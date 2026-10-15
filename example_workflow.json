@@ -6,14 +6,14 @@
       "type": "find_image",
       "image": "C:\\Users\\alexn\\Pictures\\scripts\\trials_body\\target.png",
       "threshold": 0.88,
-      "retries": 5,
+      "retries": 1,
       "retry_delay": 0.8,
       "click_match": true,
       "offset_x": 0,
       "offset_y": 0,
       "region": "",
       "on_true": "completed_mission",
-      "on_false": "",
+      "on_false": "start_mission",
       "next": ""
     },
     {
@@ -21,18 +21,18 @@
       "type": "find_image",
       "image": "C:\\Users\\alexn\\Pictures\\scripts\\trials_body\\mission_completed.png",
       "threshold": 0.8,
-      "retries": 5,
-      "retry_delay": 15.0,
+      "retries": 1,
+      "retry_delay": 3.0,
       "click_match": true,
       "offset_x": 0,
       "offset_y": 0,
       "region": "",
-      "on_true": "",
+      "on_true": "level_up",
       "on_false": "completed_mission",
       "next": ""
     },
     {
-      "id": "wait_completed",
+      "id": "wait_level_up",
       "type": "wait",
       "seconds": 3.0,
       "next": ""
@@ -43,7 +43,7 @@
       "image": "C:\\Users\\alexn\\Pictures\\scripts\\trials_body\\ok.png",
       "threshold": 0.88,
       "retries": 5,
-      "retry_delay": 0.8,
+      "retry_delay": 1.0,
       "click_match": true,
       "offset_x": 0,
       "offset_y": 0,
@@ -57,7 +57,7 @@
       "type": "find_image",
       "image": "C:\\Users\\alexn\\Pictures\\scripts\\trials_body\\next.png",
       "threshold": 0.88,
-      "retries": 5,
+      "retries": 4,
       "retry_delay": 0.8,
       "click_match": true,
       "offset_x": 0,
@@ -70,7 +70,7 @@
     {
       "id": "wait_trials",
       "type": "wait",
-      "seconds": 1.0,
+      "seconds": 2.0,
       "next": ""
     },
     {
@@ -78,8 +78,8 @@
       "type": "find_image",
       "image": "C:\\Users\\alexn\\Pictures\\scripts\\trials_body\\next.png",
       "threshold": 0.88,
-      "retries": 5,
-      "retry_delay": 0.8,
+      "retries": 2,
+      "retry_delay": 0.5,
       "click_match": true,
       "offset_x": 0,
       "offset_y": 0,
@@ -91,14 +91,21 @@
     {
       "id": "wait_items",
       "type": "wait",
-      "seconds": 1.0,
+      "seconds": 2.0,
       "next": ""
     },
     {
-      "id": "items",
+      "id": "fast_items",
       "type": "tap",
-      "x": 200,
-      "y": 200,
+      "x": 0,
+      "y": 0,
+      "next": ""
+    },
+    {
+      "id": "fast_items_two",
+      "type": "tap",
+      "x": 0,
+      "y": 0,
       "next": ""
     },
     {
@@ -113,22 +120,22 @@
       "offset_y": 0,
       "region": "",
       "on_true": "",
-      "on_false": "items",
-      "next": ""
+      "on_false": "fast_items",
+      "next": "refill_stamina"
     },
     {
       "id": "refill_stamina",
       "type": "find_image",
       "image": "C:\\Users\\alexn\\Pictures\\scripts\\trials_body\\refill_stamina.png",
       "threshold": 0.88,
-      "retries": 5,
+      "retries": 2,
       "retry_delay": 0.8,
       "click_match": false,
       "offset_x": 0,
       "offset_y": 0,
       "region": "",
       "on_true": "no_refill",
-      "on_false": "wait_retry",
+      "on_false": "start_mission",
       "next": ""
     },
     {
@@ -162,7 +169,79 @@
       "next": ""
     },
     {
+      "id": "wait_completion",
+      "type": "wait",
+      "seconds": 2.0,
+      "next": ""
+    },
+    {
       "id": "skip_friend",
+      "type": "find_image",
+      "image": "C:\\Users\\alexn\\Pictures\\scripts\\trials_body\\ok_friend.png",
+      "threshold": 0.8,
+      "retries": 5,
+      "retry_delay": 0.8,
+      "click_match": true,
+      "offset_x": 0,
+      "offset_y": 0,
+      "region": "",
+      "on_true": "",
+      "on_false": "",
+      "next": ""
+    },
+    {
+      "id": "press_add_stamina",
+      "type": "find_image",
+      "image": "C:\\Users\\alexn\\Pictures\\scripts\\trials_body\\add_stamina.png",
+      "threshold": 0.85,
+      "retries": 5,
+      "retry_delay": 0.8,
+      "click_match": true,
+      "offset_x": 0,
+      "offset_y": 0,
+      "region": "",
+      "on_true": "",
+      "on_false": "",
+      "next": ""
+    },
+    {
+      "id": "press_vigor_sphere",
+      "type": "find_image",
+      "image": "C:\\Users\\alexn\\Pictures\\scripts\\trials_body\\vigor_sphere.png",
+      "threshold": 0.88,
+      "retries": 5,
+      "retry_delay": 0.8,
+      "click_match": true,
+      "offset_x": 0,
+      "offset_y": 0,
+      "region": "",
+      "on_true": "",
+      "on_false": "",
+      "next": ""
+    },
+    {
+      "id": "use_vigor_sphere",
+      "type": "find_image",
+      "image": "C:\\Users\\alexn\\Pictures\\scripts\\trials_body\\use.png",
+      "threshold": 0.88,
+      "retries": 5,
+      "retry_delay": 0.8,
+      "click_match": true,
+      "offset_x": 0,
+      "offset_y": 0,
+      "region": "",
+      "on_true": "",
+      "on_false": "",
+      "next": ""
+    },
+    {
+      "id": "wait_transition",
+      "type": "wait",
+      "seconds": 1.0,
+      "next": ""
+    },
+    {
+      "id": "press_ok_refill_completed",
       "type": "find_image",
       "image": "C:\\Users\\alexn\\Pictures\\scripts\\trials_body\\ok.png",
       "threshold": 0.88,
@@ -172,14 +251,14 @@
       "offset_x": 0,
       "offset_y": 0,
       "region": "",
-      "on_true": "select_mission",
+      "on_true": "",
       "on_false": "",
       "next": ""
     },
     {
-      "id": "select_mission",
+      "id": "select_mission_s",
       "type": "find_image",
-      "image": "C:\\Users\\alexn\\Pictures\\scripts\\trials_body\\trials_body_a.png",
+      "image": "C:\\Users\\alexn\\Pictures\\scripts\\trials_body\\mission_difficulty_icon_s.png",
       "threshold": 0.88,
       "retries": 5,
       "retry_delay": 0.8,
@@ -187,8 +266,29 @@
       "offset_x": 0,
       "offset_y": 0,
       "region": "",
-      "on_true": "solo_mission",
+      "on_true": "wait_solo_mission",
+      "on_false": "select_mission_a",
+      "next": ""
+    },
+    {
+      "id": "select_mission_a",
+      "type": "find_image",
+      "image": "C:\\Users\\alexn\\Pictures\\scripts\\trials_body\\mission_difficulty_icon_a.png",
+      "threshold": 0.88,
+      "retries": 5,
+      "retry_delay": 0.8,
+      "click_match": true,
+      "offset_x": 0,
+      "offset_y": 0,
+      "region": "",
+      "on_true": "",
       "on_false": "",
+      "next": ""
+    },
+    {
+      "id": "wait_solo_mission",
+      "type": "wait",
+      "seconds": 1.0,
       "next": ""
     },
     {
@@ -232,15 +332,24 @@
       "offset_x": 0,
       "offset_y": 0,
       "region": "",
-      "on_true": "start_mission",
+      "on_true": "ok_replace_support",
       "on_false": "",
       "next": ""
     },
     {
-      "id": "wait_retry",
-      "type": "wait",
-      "seconds": 3.0,
-      "next": "start_mission"
+      "id": "ok_replace_support",
+      "type": "find_image",
+      "image": "C:\\Users\\alexn\\Pictures\\scripts\\trials_body\\ok.png",
+      "threshold": 0.88,
+      "retries": 5,
+      "retry_delay": 0.8,
+      "click_match": true,
+      "offset_x": 0,
+      "offset_y": 0,
+      "region": "",
+      "on_true": "start_mission",
+      "on_false": "",
+      "next": ""
     }
   ]
 }
