@@ -5,6 +5,7 @@ import io
 import json
 import re
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -22,7 +23,9 @@ class AutomationError(RuntimeError):
 class ADB:
     def __init__(self, serial: str = "", executable: str = "adb", timeout: int = 12):
         self.serial = serial
-        self.executable = executable
+        folder = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
+        portable_adb = folder / "platform-tools" / "adb.exe"
+        self.executable = str(portable_adb) if executable == "adb" and portable_adb.is_file() else executable
         self.timeout = timeout
 
     def command(self, *parts: str, binary: bool = False):
@@ -31,9 +34,10 @@ class ADB:
             args += ["-s", self.serial]
         args += [str(p) for p in parts]
         try:
-            out = subprocess.run(args, capture_output=True, timeout=self.timeout, check=False)
+            out = subprocess.run(args, capture_output=True, timeout=self.timeout, check=False,
+                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         except FileNotFoundError as exc:
-            raise AutomationError("ADB not found. Install Android Platform Tools and add adb to PATH.") from exc
+            raise AutomationError("ADB not found. Put the Android platform-tools folder beside the app, or add adb to PATH.") from exc
         except subprocess.TimeoutExpired as exc:
             raise AutomationError("ADB command timed out") from exc
         if out.returncode:

@@ -2,7 +2,38 @@
 
 A desktop Python/Tkinter workflow editor for controlling **your Android phone or emulator via ADB**. It supports OpenCV screenshot matching, conditional branching, retry limits, clicks, swipes, key presses, text input, loops, JSON saving and an emergency stop.
 
-## Requirements
+The editor uses the [Sun Valley ttk theme](https://github.com/rdbende/Sun-Valley-ttk-theme) for Windows 11-style controls, with separate file and device toolbars, scrollable workflow/configuration panels, and a light execution log. The theme is included in the Windows executable; source users should reinstall `requirements.txt` when updating.
+
+## Run the Windows executable
+
+Double-click `AndroidVisualAutoclicker.exe`. Users do not need Python, pip, or a terminal.
+
+Download and extract [Android SDK Platform Tools for Windows](https://developer.android.com/tools/releases/platform-tools), then put the entire `platform-tools` folder beside the executable (including its DLLs). An existing `adb` on PATH also works.
+
+```text
+AndroidVisualAutoclicker.exe
+platform-tools/
+    adb.exe
+    AdbWinApi.dll
+    AdbWinUsbApi.dll
+    ...
+```
+
+Connect a device with USB debugging enabled or start your emulator, then click **Refresh** or **Connect MuMu**. Authorize debugging on the phone when prompted.
+
+The executable stores its default workflow and captured templates in `%LOCALAPPDATA%\AndroidVisualAutoclicker`. **Open** and **Save as** can use other folders. Keep workflow JSON files together with their referenced template images when sharing them.
+
+## Build the Windows executable (maintainers)
+
+On Windows with Python 3.10+ installed, run from the project folder:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build_windows.ps1
+```
+
+The script installs dependencies in `.venv-build` and uses PyInstaller to produce `dist\AndroidVisualAutoclicker.exe` with Python, Tkinter and the required libraries included. Share that executable with users. Android Platform Tools are installed separately as described above. The first launch may take a few seconds while the executable extracts its libraries. Build on the Windows architecture you intend to support.
+
+## Requirements (running from source)
 
 - Windows 10/11 (also works on desktop Linux/macOS with Tkinter installed)
 - Python 3.10+
