@@ -1,57 +1,82 @@
 # Android Visual Autoclicker
 
-A desktop Python/Tkinter workflow editor for controlling **your Android phone or emulator via ADB**. It supports OpenCV screenshot matching, conditional branching, retry limits, clicks, swipes, key presses, text input, loops, JSON saving and an emergency stop.
+A desktop **Python/PySide6 (Qt Widgets)** workflow editor for controlling an Android phone or emulator through ADB. It supports OpenCV screenshot matching, branching, retries, taps, swipes, key presses, text input, loops, JSON workflows, and emergency stop.
 
-The editor uses the [Sun Valley ttk theme](https://github.com/rdbende/Sun-Valley-ttk-theme) for Windows 11-style controls, with separate file and device toolbars and scrollable workflow/configuration panels. Choose **Light**, **Dark**, or **System** from the **Appearance** dropdown in the header. System is the default and follows OS appearance changes while the app is open (checked every two seconds); unsupported systems fall back to light. The execution log follows the selected theme too. Your choice is saved in `%LOCALAPPDATA%\AndroidVisualAutoclicker\settings.json` on Windows, or `~/.config/AndroidVisualAutoclicker/settings.json` elsewhere. The theme is included in the Windows executable; source users should reinstall `requirements.txt` when updating.
+The editor uses Qt's platform style, native file dialogs, keyboard shortcuts, and resizable panels. **System**, **Light**, and **Dark** appearance use Qt's OS color-scheme integration; explicit overrides depend on the platform/style. Device discovery, connection, screenshot capture, and workflow execution run off the GUI thread. Prepared image templates are cached for each run, and the execution log is bounded to 2,000 lines.
 
-## Run the Windows executable
+## Run from source (Windows, Linux, macOS)
 
-Double-click `AndroidVisualAutoclicker.exe`. Users do not need Python, pip, or a terminal.
+Use Python 3.10+ and the Android SDK [Platform Tools](https://developer.android.com/tools/releases/platform-tools) for your OS. Put `adb` on PATH or place the complete `platform-tools` directory beside `app.py`. Connect a device with USB debugging enabled and authorize it when prompted.
 
-Download and extract [Android SDK Platform Tools for Windows](https://developer.android.com/tools/releases/platform-tools), then put the entire `platform-tools` folder beside the executable (including its DLLs). An existing `adb` on PATH also works.
+Windows PowerShell:
 
-```text
-AndroidVisualAutoclicker.exe
-platform-tools/
-    adb.exe
-    AdbWinApi.dll
-    AdbWinUsbApi.dll
-    ...
+```powershell
+py -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe app.py
 ```
 
-Connect a device with USB debugging enabled or start your emulator, then click **Refresh** or **Connect MuMu**. Authorize debugging on the phone when prompted.
+Linux/macOS:
 
-The executable stores its default workflow and captured templates in `%LOCALAPPDATA%\AndroidVisualAutoclicker`. **Open** and **Save as** can use other folders. Keep workflow JSON files together with their referenced template images when sharing them.
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python app.py
+```
 
-## Build the Windows executable (maintainers)
+Use a desktop OS/version supported by the installed Qt release. Linux needs the system libraries for Qt's X11 or Wayland platform plugin; USB devices may need appropriate udev rules. No Tkinter installation is required. When upgrading an existing environment, uninstall `opencv-python` before installing the new requirements: the app now uses `opencv-python-headless` to avoid a second GUI toolkit. Do not install both OpenCV packages in the same environment.
 
-On Windows with Python 3.10+ installed, run from the project folder:
+## Packaged application
+
+Build separately on each target OS and architecture. Windows builds cannot produce macOS or Linux binaries.
+
+```sh
+python -m pip install -r requirements-build.txt
+python build_app.py
+```
+
+On Windows, `build_windows.ps1` creates/uses `.venv-build`, installs dependencies, and invokes the same builder:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build_windows.ps1
 ```
 
-The script installs dependencies in `.venv-build` and uses PyInstaller to produce `dist\AndroidVisualAutoclicker.exe` with Python, Tkinter and the required libraries included. Share that executable with users. Android Platform Tools are installed separately as described above. The first launch may take a few seconds while the executable extracts its libraries. Build on the Windows architecture you intend to support.
+Outputs:
 
-## Requirements (running from source)
+- Windows: `dist/AndroidVisualAutoclicker/AndroidVisualAutoclicker.exe`
+- Linux: `dist/AndroidVisualAutoclicker/AndroidVisualAutoclicker`
+- macOS: `dist/AndroidVisualAutoclicker.app`
 
-- Windows 10/11 (also works on desktop Linux/macOS with Tkinter installed)
-- Python 3.10+
-- [Android SDK Platform Tools](https://developer.android.com/tools/releases/platform-tools) (`adb` in your system PATH)
-- A connected Android device with USB debugging enabled, or an emulator exposing ADB
+**Distribute the entire application folder or `.app` bundle.** The directory build avoids extracting Python/Qt libraries on every launch. Old `dist/AndroidVisualAutoclicker.exe` single-file builds are not updated by this script. macOS public distribution still requires signing/notarization with your own credentials.
 
-## Install and launch (Windows PowerShell)
+Place the OS-specific `platform-tools` folder beside the executable (beside the `.app` bundle on macOS), or install ADB on PATH. On Unix systems the `adb` binary must be executable. Windows requires the ADB DLLs from the complete Platform Tools distribution.
 
-```powershell
-py -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-python app.py
+## Settings and workflows
+
+The default workflow (`workflow.json`), captured templates (`templates/`), and appearance (`settings.json`) are stored in:
+
+- Windows: `%LOCALAPPDATA%/AndroidVisualAutoclicker`
+- macOS: `~/Library/Application Support/AndroidVisualAutoclicker`
+- Linux: `$XDG_CONFIG_HOME/AndroidVisualAutoclicker`, or `~/.config/AndroidVisualAutoclicker`
+
+Existing workflow JSON files remain supported: use **Open** to select them, including old `example_workflow.json` files. Relative template paths resolve against the workflow's directory. Keep templates with the workflow when moving it between computers; absolute paths need updating on a different computer. Choose **Apply changes** before selecting a different step. Save and Run apply the currently selected step automatically.
+
+## Keyboard shortcuts and stop behavior
+
+- F6: run; F8 or Escape: stop while the app is focused.
+- Ctrl+O / Ctrl+S / Ctrl+Shift+S (Command on macOS): open / save / save as.
+- Global F8 uses `pynput` where available. macOS may require Accessibility/Input Monitoring permission. Under Wayland, the app uses focused F8 and the STOP button instead of claiming a system-wide shortcut. A failed global listener does not prevent startup.
+
+Stop is cooperative: an in-flight ADB command may take up to its 12-second timeout. Closing waits for background operations to finish; a connect-and-refresh operation can involve two such commands. A stop received during screenshot capture is checked before sending a matched tap. Editing and device operations are disabled while a workflow runs.
+
+## Verification
+
+```sh
+python -m unittest discover -s tests -v
+python scripts/smoke_package.py  # After building: initialize the packaged Qt app and exit
 ```
 
-If PowerShell blocks activation, use `.venv\Scripts\python.exe -m pip install -r requirements.txt` then `.venv\Scripts\python.exe app.py`.
-
-Confirm device setup with `adb devices`; authorize debugging on the phone when prompted. For emulators, start the emulator before clicking **Refresh**.
+Tests use fake ADB devices and Qt's offscreen platform to cover workflow compatibility, matching, caching, crop coordinates, background responsiveness, stop behavior, and shutdown. They do not replace real-device testing or native OS packaging checks. The CI matrix builds and runs tests on Windows, Linux, and macOS; Linux/macOS runtime compatibility must still be verified on target desktops.
 
 ## MuMu Player 12 v6.8.3 (Android 12)
 
@@ -61,7 +86,7 @@ Confirm device setup with `adb devices`; authorize debugging on the phone when p
 4. Click **Capture template** to obtain image crops from the emulator itself; your Windows cursor is not moved by ADB screenshots or taps.
 5. Press **Run**. The application sends taps and key events directly to Android, so your Windows mouse and keyboard remain usable.
 
-**Important:** MuMu must remain running; minimizing or covering its Windows window generally does not prevent ADB screenshots. Keep the Android resolution/orientation constant for reliable template matching. The **global F8** listener is active while the editor is open, even if another window is focused; STOP works in the editor too. ADB commands have a 12-second timeout, so stopping an in-flight command is not instantaneous. Some games may restrict automation.
+**Important:** MuMu must remain running; minimizing or covering its Windows window generally does not prevent ADB screenshots. Keep the Android resolution/orientation constant for reliable template matching. The **global F8** listener is available where the OS permits it; see the shortcut limitations above. STOP works in the editor too. ADB commands have a 12-second timeout, so stopping an in-flight command is not instantaneous. Some games may restrict automation.
 
 ## Creating a workflow
 
@@ -69,7 +94,7 @@ Confirm device setup with `adb devices`; authorize debugging on the phone when p
 2. Select a step on the left. Set its **Action** to `find_image`, choose your PNG, set `threshold` (typically 0.80-0.93), attempts, retry delay, and whether to tap the match. Hit **Apply changes**.
 3. Use **+ Add** to create follow-up steps. `If found: step ID` and `If missing: step ID` route to separate steps. `Next step ID` overrides moving to the next row. A blank target defaults to the following row.
 4. Use `goto` for unconditional jumps and loops. Use `stop` to end execution. A 10,000-step execution ceiling protects against accidental infinite loops.
-5. Click **Save as** to store your workflow, then **Run**. Press **F8 globally** or the **STOP** button to abort. Stop is cooperative: an in-flight ADB command may last up to 12 seconds before the engine can interrupt.
+5. Click **Save as** to store your workflow, then **Run**. Press **F8** (globally where available) or the **STOP** button to abort. Stop is cooperative: an in-flight ADB command may last up to 12 seconds before the engine can interrupt.
 
 ## Actions
 
@@ -97,7 +122,11 @@ Confirm device setup with `adb devices`; authorize debugging on the phone when p
 
 ## Project files
 
-- `app.py` — Tkinter workflow editor and template crop tool
+- `app.py` — Qt workflow editor, background device jobs, and template crop tool
 - `engine.py` — ADB interface, OpenCV recognition and workflow runner
 - `example_workflow.json` — example branching workflow (replace placeholder PNG)
 - `requirements.txt` — Python packages
+
+- `workflow_model.py` — toolkit-independent editor fields and defaults
+- `build_app.py` — platform-aware PyInstaller directory/app-bundle build
+- `tests/test_migration.py` — engine and Qt migration regression tests

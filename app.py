@@ -1,30 +1,46 @@
-"""Desktop workflow designer for Android visual automation."""
+"""Qt desktop workflow editor. Device I/O never runs on the GUI thread."""
 from __future__ import annotations
 
 import copy
+import argparse
 import json
+import math
 import os
 import queue
 import re
 import sys
 import threading
-import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, simpledialog, ttk
-from pynput import keyboard
-import sv_ttk
-import darkdetect
 
-from PIL import Image, ImageTk
+from PIL import Image
+from PySide6.QtCore import QPoint, QRect, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QImage, QKeySequence, QPixmap
+from PySide6.QtWidgets import (
+    QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout,
+    QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow,
+    QMessageBox, QPlainTextEdit, QPushButton, QRubberBand, QScrollArea,
+    QSplitter, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+)
 
-from engine import ADB, AutomationError, load_workflow, run_workflow, save_workflow
+from engine import ADB, AutomationError, load_workflow, run_workflow, save_workflow, validate
+from workflow_model import DEFAULTS, FIELDS, FIELDS_BY_TYPE, new_step
+from platform_style import PlatformStyle
+
+
+def data_directory():
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return base / "AndroidVisualAutoclicker"
+
 
 ROOT = Path(__file__).resolve().parent
-if getattr(sys, "frozen", False):
-    ROOT = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "AndroidVisualAutoclicker"
-TEMPLATES = ROOT / "templates"
-TEMPLATES.mkdir(parents=True, exist_ok=True)
-SETTINGS_PATH = Path(os.environ.get("LOCALAPPDATA", Path.home() / ".config")) / "AndroidVisualAutoclicker" / "settings.json"
+DATA = data_directory()
+SETTINGS_PATH = DATA / "settings.json"
+TEMPLATES = DATA / "templates"
 APPEARANCES = ("System", "Light", "Dark")
 
 
@@ -43,543 +59,586 @@ def save_appearance(value):
     temporary.write_text(json.dumps({"appearance": value}, indent=2), encoding="utf-8")
     temporary.replace(SETTINGS_PATH)
 
-FIELDS = [
-    ("id", "Step ID"), ("type", "Action"), ("image", "Image file"),
-    ("threshold", "Similarity (0..1)"), ("retries", "Attempts"),
-    ("retry_delay", "Retry delay (s)"), ("click_match", "Tap matched image"),
-    ("offset_x", "Tap offset X"), ("offset_y", "Tap offset Y"),
-    ("region", "Region x,y,w,h"),
-    ("on_true", "If found: step ID"), ("on_false", "If missing: step ID"),
-    ("next", "Next step ID"), ("seconds", "Wait seconds"),
-    ("x", "X"), ("y", "Y"), ("x2", "End X"), ("y2", "End Y"),
-    ("duration", "Swipe milliseconds"), ("key", "Android key code"),
-    ("text", "Input text"),
-]
-FIELDS_BY_TYPE = {
-    "find_image": ["image", "threshold", "retries", "retry_delay", "click_match", "offset_x", "offset_y", "region", "on_true", "on_false", "next"],
-    "tap": ["x", "y", "next"], "wait": ["seconds", "next"],
-    "swipe": ["x", "y", "x2", "y2", "duration", "next"],
-    "key": ["key", "next"], "text": ["text", "next"],
-    "goto": ["next"], "stop": [],
-}
-DEFAULTS = {
-    "find_image": {"image": "", "threshold": 0.88, "retries": 5, "retry_delay": 0.8, "click_match": True, "offset_x": 0, "offset_y": 0, "region": "", "on_true": "", "on_false": "", "next": ""},
-    "tap": {"x": 200, "y": 200, "next": ""},
-    "wait": {"seconds": 1.0, "next": ""},
-    "swipe": {"x": 250, "y": 900, "x2": 250, "y2": 300, "duration": 450, "next": ""},
-    "key": {"key": "KEYCODE_BACK", "next": ""},
-    "text": {"text": "hello", "next": ""},
-    "goto": {"next": ""}, "stop": {},
-}
 
+class CropCanvas(QLabel):
+    selected = Signal(object)
 
-def new_step(kind, taken):
-    i = 1
-    while f"step_{i}" in taken:
-        i += 1
-    return {"id": f"step_{i}", "type": kind, **copy.deepcopy(DEFAULTS[kind])}
-
-
-class CropDialog(tk.Toplevel):
-    def __init__(self, parent, image: Image.Image, save_to: Path, callback):
+    def __init__(self, image, parent=None):
         super().__init__(parent)
-        self.title("Drag to select template region")
         self.image = image
-        self.save_to = save_to
-        self.callback = callback
-        self.start = None
-        self.rect = None
-        self.scale = min(1.0, 900 / image.width, 650 / image.height)
-        resized = image.resize((round(image.width * self.scale), round(image.height * self.scale)))
-        self.photo = ImageTk.PhotoImage(resized)
-        self.canvas = tk.Canvas(self, width=resized.width, height=resized.height, cursor="crosshair", highlightthickness=0)
-        self.canvas.pack(padx=10, pady=10)
-        self.canvas.create_image(0, 0, image=self.photo, anchor="nw")
-        self.canvas.bind("<ButtonPress-1>", self.down)
-        self.canvas.bind("<B1-Motion>", self.move)
-        self.canvas.bind("<ButtonRelease-1>", self.up)
-        ttk.Label(self, text="Drag a rectangle around the feature to recognize; avoid large uniform areas.").pack(pady=(0, 10))
-        self.transient(parent)
-        self.grab_set()
+        scale = min(1.0, 900 / image.width, 650 / image.height)
+        size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+        preview = image.convert("RGB").resize(size)
+        qimage = QImage(preview.tobytes(), *size, size[0] * 3, QImage.Format.Format_RGB888).copy()
+        self.setPixmap(QPixmap.fromImage(qimage))
+        self.setFixedSize(*size)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        self.band = QRubberBand(QRubberBand.Shape.Rectangle, self)
+        self.origin = None
 
-    def down(self, event):
-        self.start = (event.x, event.y)
-        if self.rect:
-            self.canvas.delete(self.rect)
-        self.rect = self.canvas.create_rectangle(event.x, event.y, event.x, event.y, outline="#00e5ff", width=2)
+    def bounded(self, point):
+        return QPoint(max(0, min(self.width(), point.x())), max(0, min(self.height(), point.y())))
 
-    def move(self, event):
-        if self.start:
-            self.canvas.coords(self.rect, *self.start, event.x, event.y)
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.origin = self.bounded(event.position().toPoint())
+            self.band.setGeometry(QRect(self.origin, self.origin))
+            self.band.show()
 
-    def up(self, event):
-        if not self.start:
+    def mouseMoveEvent(self, event):
+        if self.origin is not None:
+            self.band.setGeometry(QRect(self.origin, self.bounded(event.position().toPoint())).normalized())
+
+    def mouseReleaseEvent(self, event):
+        if self.origin is None or event.button() != Qt.MouseButton.LeftButton:
             return
-        x1, x2 = sorted((self.start[0], event.x))
-        y1, y2 = sorted((self.start[1], event.y))
-        self.start = None
+        end = self.bounded(event.position().toPoint())
+        x1, x2 = sorted((self.origin.x(), end.x()))
+        y1, y2 = sorted((self.origin.y(), end.y()))
+        self.origin = None
         if x2 - x1 < 12 or y2 - y1 < 12:
-            messagebox.showwarning("Selection too small", "Select an area at least 12 pixels wide and tall.", parent=self)
             return
-        box = tuple(int(value / self.scale) for value in (x1, y1, x2, y2))
-        crop = self.image.crop(box)
-        self.save_to.parent.mkdir(parents=True, exist_ok=True)
-        crop.save(self.save_to)
-        self.callback(self.save_to)
-        self.destroy()
+        box = (round(x1 * self.image.width / self.width()), round(y1 * self.image.height / self.height()),
+               round(x2 * self.image.width / self.width()), round(y2 * self.image.height / self.height()))
+        self.selected.emit(box)
 
 
-class Editor(tk.Tk):
-    def __init__(self):
+class CropDialog(QDialog):
+    def __init__(self, parent, image, save_to):
+        super().__init__(parent)
+        self.setWindowTitle("Capture template")
+        self.image, self.save_to = image, save_to
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Drag a rectangle at least 12 pixels wide and tall around the feature."))
+        self.canvas = CropCanvas(image)
+        layout.addWidget(self.canvas)
+        self.canvas.selected.connect(self.save_crop)
+
+    def save_crop(self, box):
+        try:
+            self.save_to.parent.mkdir(parents=True, exist_ok=True)
+            self.image.crop(box).save(self.save_to)
+        except OSError as exc:
+            QMessageBox.critical(self, "Could not save template", str(exc))
+            return
+        self.accept()
+
+
+class Editor(QMainWindow):
+    def __init__(self, *, startup=True):
         super().__init__()
-        self.appearance = tk.StringVar(value=load_appearance())
-        self.system_theme = "light"
-        self.active_theme = None
-        self.theme_stop = threading.Event()
-        self.apply_appearance()
-        self.title("Android Visual Autoclicker — ADB Workflow Studio")
-        self.geometry("1280x860")
-        self.minsize(1100, 720)
-        self.workflow_path = ROOT / "example_workflow.json"
+        self.setWindowTitle("Android Visual Autoclicker — Workflow Studio")
+        self.resize(1200, 850)
+        self.setMinimumSize(850, 600)
+        self.workflow_path = DATA / "workflow.json"
         self.steps = [new_step("find_image", set()), new_step("wait", {"step_1"}), new_step("stop", {"step_1", "step_2"})]
-        self.current = None
         self.running = False
+        self.busy = False
+        self.closing = False
         self.stop_event = threading.Event()
         self.messages = queue.Queue()
-        self.adb = ADB()
-        self.vars = {}
-        self.widgets = {}
+        self.workers = []
+        self.hotkey_listener = None
+        self.vars, self.rows = {}, {}
         self._build()
-        self.apply_appearance()
-        threading.Thread(target=self.watch_system_theme, daemon=True).start()
-        self.refresh_tree()
-        self.tree.selection_set(self.steps[0]["id"])
-        self.on_select()
-        self.after(100, self.process_messages)
-        self.protocol("WM_DELETE_WINDOW", self.close)
-        self.bind_all("<F8>", lambda _e: self.stop())
-        self.bind_all("<Escape>", lambda _e: self.stop() if self.running else None)
-        self.hotkey_listener = keyboard.Listener(on_press=self.global_key)
-        self.hotkey_listener.daemon = True
-        self.hotkey_listener.start()
+        self.platform_style = PlatformStyle(self)
+        self.change_appearance(persist=False)
+        self.refresh_tree(self.steps[0]["id"])
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.process_messages)
+        self.timer.start(30)
+        if startup:
+            self.start_hotkey()
+            QTimer.singleShot(0, self.refresh_devices)
 
-    def watch_system_theme(self):
-        # OS detection stays off the Tk thread; all widget changes use the queue.
-        while not self.theme_stop.is_set():
-            try:
-                theme = "dark" if darkdetect.isDark() else "light"
-            except Exception:
-                theme = "light"
-            self.messages.put(("system_theme", theme))
-            self.theme_stop.wait(2)
-
-    def change_appearance(self, _event=None):
-        self.apply_appearance()
-        try:
-            save_appearance(self.appearance.get())
-        except OSError as exc:
-            messagebox.showwarning("Appearance not saved", f"The theme was applied, but could not be saved for next time.\n{exc}", parent=self)
-
-    def apply_appearance(self):
-        preference = self.appearance.get()
-        theme = self.system_theme if preference == "System" else preference.lower()
-        if theme != self.active_theme:
-            sv_ttk.set_theme(theme)
-            self.active_theme = theme
-        dark = theme == "dark"
-        style = ttk.Style(self)
-        style.configure("Title.TLabel", font=("Segoe UI", 20, "bold"))
-        style.configure("Section.TLabel", font=("Segoe UI", 12, "bold"))
-        style.configure("Muted.TLabel", foreground="#bdbdbd" if dark else "#616161")
-        style.configure("Treeview", rowheight=34)
-        style.configure("Compact.TButton", padding=(8, 5), width=3)
-        if hasattr(self, "form_canvas"):
-            self.form_canvas.configure(bg=self.cget("background"))
-        if hasattr(self, "log_view"):
-            foreground = "#eeeeee" if dark else "#323130"
-            self.log_view.configure(bg="#202020" if dark else "#ffffff", fg=foreground,
-                                    insertbackground=foreground,
-                                    selectbackground="#315d80" if dark else "#cce4f7",
-                                    selectforeground="#ffffff" if dark else "#1a1a1a")
+    @staticmethod
+    def button(layout, label, callback):
+        button = QPushButton(label)
+        button.clicked.connect(callback)
+        layout.addWidget(button)
+        return button
 
     def _build(self):
-        main = ttk.Frame(self, padding=20)
-        main.pack(fill="both", expand=True)
-        header = ttk.Frame(main)
-        header.pack(fill="x", pady=(0, 16))
-        ttk.Label(header, text="Workflow Studio", style="Title.TLabel").pack(side="left")
-        ttk.Label(header, text="Appearance:").pack(side="left", padx=(24, 6))
-        appearance_combo = ttk.Combobox(header, textvariable=self.appearance, values=APPEARANCES, state="readonly", width=9)
-        appearance_combo.pack(side="left")
-        appearance_combo.bind("<<ComboboxSelected>>", self.change_appearance)
-        ttk.Button(header, text="Save as", command=self.save_as).pack(side="right")
-        ttk.Button(header, text="Save", command=self.save).pack(side="right", padx=6)
-        ttk.Button(header, text="Open", command=self.open_file).pack(side="right")
-        toolbar = ttk.Frame(main)
-        toolbar.pack(fill="x", pady=(0, 16))
-        ttk.Label(toolbar, text="Device:").pack(side="left")
-        self.device = tk.StringVar()
-        self.device_combo = ttk.Combobox(toolbar, textvariable=self.device, width=23)
-        self.device_combo.pack(side="left", padx=5)
-        ttk.Button(toolbar, text="Refresh", command=self.refresh_devices).pack(side="left")
-        ttk.Button(toolbar, text="Connect MuMu", command=self.connect_mumu).pack(side="left", padx=4)
-        ttk.Button(toolbar, text="Capture template", command=self.capture).pack(side="left", padx=8)
-        self.start_btn = ttk.Button(toolbar, text="▶ Run (F6)", style="Accent.TButton", command=self.run)
-        self.start_btn.pack(side="right", padx=4)
-        self.stop_btn = ttk.Button(toolbar, text="■ STOP (F8)", command=self.stop)
-        self.stop_btn.pack(side="right", padx=4)
-        self.bind_all("<F6>", lambda _e: self.run())
-
-        split = ttk.Panedwindow(main, orient="horizontal")
-        split.pack(fill="both", expand=True)
-        left = ttk.Frame(split, padding=(0, 0, 12, 0))
-        right = ttk.Frame(split, padding=(12, 0, 0, 0))
-        split.add(left, weight=5)
-        split.add(right, weight=4)
-        ttk.Label(left, text="Workflow steps", style="Section.TLabel").pack(anchor="w", pady=(0, 12))
-        tree_frame = ttk.Frame(left)
-        tree_frame.pack(fill="both", expand=True)
-        self.tree = ttk.Treeview(tree_frame, columns=("action", "flow"), show="tree headings", selectmode="browse")
-        self.tree.heading("#0", text="ID")
-        self.tree.heading("action", text="Action")
-        self.tree.heading("flow", text="Transitions")
-        self.tree.column("#0", width=125, stretch=False)
-        self.tree.column("action", width=112, stretch=False)
-        self.tree.column("flow", width=220)
-        tree_scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=tree_scroll.set)
-        tree_scroll.pack(side="right", fill="y")
-        self.tree.pack(side="left", fill="both", expand=True)
-        self.tree.bind("<<TreeviewSelect>>", lambda _e: self.on_select())
-        row = ttk.Frame(left)
-        row.pack(fill="x", pady=7)
-        self.kind = tk.StringVar(value="find_image")
-        ttk.Combobox(row, textvariable=self.kind, values=list(DEFAULTS), state="readonly", width=15).pack(side="left")
-        for label, command in [("+ Add", self.add_step), ("Clone", self.clone_step), ("Delete", self.delete_step), ("↑", lambda: self.move(-1)), ("↓", lambda: self.move(1))]:
-            ttk.Button(row, text=label, command=command, style="Compact.TButton" if label in {"↑", "↓"} else "TButton", width=3 if label in {"↑", "↓"} else 6).pack(side="left", padx=2)
-        ttk.Label(left, text="Use ↑ ↓ to reorder. Branches refer to step IDs.\nBlank next continues to the following row.\nThe highlighted row shows the executing step.", style="Muted.TLabel", justify="left").pack(anchor="w", pady=(4, 0))
-
-        ttk.Label(right, text="Step configuration", style="Section.TLabel").pack(anchor="w", pady=(0, 12))
-        canvas = tk.Canvas(right, highlightthickness=0, bg=self.cget("background"))
-        self.form_canvas = canvas
-        scrollbar = ttk.Scrollbar(right, orient="vertical", command=canvas.yview)
-        self.form = ttk.Frame(canvas)
-        self.form.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=self.form, anchor="nw", tags="content")
-        canvas.bind("<Configure>", lambda e: canvas.itemconfigure("content", width=e.width))
-        canvas.configure(yscrollcommand=scrollbar.set)
-        # Scope wheel scrolling to this editor, preserving dropdown/list scrolling.
-        def scroll_form(event):
-            if event.widget.winfo_class() != "TCombobox" and str(event.widget).startswith(str(right)):
-                canvas.yview_scroll(-int(event.delta / 120), "units")
-        self.bind("<MouseWheel>", scroll_form, add="+")
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        for n, (name, label) in enumerate(FIELDS):
-            wrap = ttk.Frame(self.form)
-            self.widgets[name] = wrap
-            ttk.Label(wrap, text=label, width=21).pack(side="left", padx=(5, 4))
-            variable = tk.StringVar()
-            self.vars[name] = variable
+        central = QWidget()
+        self.setCentralWidget(central)
+        main = QVBoxLayout(central)
+        main.setContentsMargins(20, 16, 20, 16)
+        main.setSpacing(12)
+        header = QHBoxLayout()
+        title = QLabel("Workflow Studio")
+        font = title.font()
+        font.setPointSize(21)
+        font.setBold(True)
+        title.setFont(font)
+        header.addWidget(title)
+        header.addStretch()
+        header.addWidget(QLabel("Appearance"))
+        self.appearance = QComboBox()
+        self.appearance.addItems(APPEARANCES)
+        self.appearance.setCurrentText(load_appearance())
+        self.appearance.currentTextChanged.connect(self.change_appearance)
+        header.addWidget(self.appearance)
+        main.addLayout(header)
+        file_menu = self.menuBar().addMenu("&File")
+        self.file_actions = []
+        self.file_buttons = []
+        for label, shortcut, callback in [("Open…", QKeySequence.StandardKey.Open, self.open_file),
+                                           ("Save", QKeySequence.StandardKey.Save, self.save),
+                                           ("Save as…", QKeySequence.StandardKey.SaveAs, self.save_as)]:
+            action = QAction(label, self)
+            action.setShortcut(shortcut)
+            action.triggered.connect(callback)
+            file_menu.addAction(action)
+            self.file_actions.append(action)
+            self.file_buttons.append(self.button(header, label, callback))
+        self.device_panel = QWidget()
+        toolbar = QHBoxLayout(self.device_panel)
+        toolbar.setContentsMargins(0, 0, 0, 0)
+        toolbar.addWidget(QLabel("Device"))
+        self.device = QComboBox()
+        self.device.setEditable(True)
+        self.device.setMinimumWidth(180)
+        toolbar.addWidget(self.device, 1)
+        self.button(toolbar, "Refresh", self.refresh_devices)
+        self.button(toolbar, "Connect MuMu…", self.connect_mumu)
+        self.button(toolbar, "Capture template…", self.capture)
+        main.addWidget(self.device_panel)
+        controls = QHBoxLayout()
+        self.hotkey_status = QLabel("F8 stops while the app is focused")
+        controls.addWidget(self.hotkey_status, 1)
+        self.start_btn = self.button(controls, "Run (F6)", self.run)
+        self.stop_btn = self.button(controls, "STOP (F8)", self.stop)
+        self.stop_btn.setEnabled(False)
+        main.addLayout(controls)
+        for key, callback in [("F6", self.run), ("F8", self.stop), ("Escape", self.stop)]:
+            action = QAction(self)
+            action.setShortcut(QKeySequence(key))
+            action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+            action.triggered.connect(callback)
+            self.addAction(action)
+        self.split = QSplitter()
+        main.addWidget(self.split, 1)
+        left = QWidget()
+        left.setAutoFillBackground(True)
+        layout = QVBoxLayout(left)
+        layout.setContentsMargins(0, 0, 8, 0)
+        layout.addWidget(QLabel("Workflow steps"))
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["Step ID", "Action", "Transitions"])
+        self.tree.setRootIsDecorated(False)
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setUniformRowHeights(True)
+        self.tree.header().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.tree.header().setStretchLastSection(True)
+        self.tree.itemSelectionChanged.connect(self.on_select)
+        layout.addWidget(self.tree, 1)
+        row = QHBoxLayout()
+        self.kind = QComboBox()
+        self.kind.addItems(DEFAULTS)
+        row.addWidget(self.kind)
+        for label, callback in [("Add", self.add_step), ("Clone", self.clone_step), ("Delete", self.delete_step),
+                                ("↑", lambda: self.move(-1)), ("↓", lambda: self.move(1))]:
+            self.button(row, label, callback)
+        layout.addLayout(row)
+        help_text = QLabel("Branches refer to step IDs. Blank next continues to the following row.")
+        help_text.setWordWrap(True)
+        layout.addWidget(help_text)
+        self.split.addWidget(left)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        form = QWidget()
+        form.setAutoFillBackground(True)
+        self.form = QFormLayout(form)
+        self.form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        for name, label in FIELDS:
             if name == "type":
-                widget = ttk.Combobox(wrap, textvariable=variable, values=list(DEFAULTS), state="readonly")
-                widget.bind("<<ComboboxSelected>>", lambda _e: self.change_type())
+                widget = QComboBox()
+                widget.addItems(DEFAULTS)
+                widget.currentTextChanged.connect(self.change_type)
             elif name == "click_match":
-                widget = ttk.Combobox(wrap, textvariable=variable, values=["True", "False"], state="readonly")
+                widget = QCheckBox()
             else:
-                widget = ttk.Entry(wrap, textvariable=variable)
-            widget.pack(side="left", fill="x", expand=True, padx=(0, 5))
+                widget = QLineEdit()
+            widget.setAccessibleName(label)
+            self.vars[name] = widget
+            wrap = QWidget()
+            row = QHBoxLayout(wrap)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.addWidget(widget, 1)
             if name == "image":
-                ttk.Button(wrap, text="Browse", command=self.browse_image).pack(side="right")
+                self.button(row, "Browse…", self.browse_image)
             if name == "region":
-                ttk.Button(wrap, text="Clear", command=lambda: self.vars["region"].set("")).pack(side="right")
+                self.button(row, "Clear", lambda: self.vars["region"].clear())
             if name in {"on_true", "on_false", "next"}:
-                ttk.Button(wrap, text="IDs", command=self.show_ids).pack(side="right")
-        ttk.Button(self.form, text="Apply changes to selected step", style="Accent.TButton", command=self.apply).pack(fill="x", padx=8, pady=12)
+                self.button(row, "IDs", self.show_ids)
+            self.form.addRow(label, wrap)
+            self.rows[name] = wrap
+        apply_button = QPushButton("Apply changes")
+        apply_button.clicked.connect(self.apply)
+        self.form.addRow(apply_button)
+        scroll.setWidget(form)
+        self.split.addWidget(scroll)
+        self.material_surfaces = [left, form]
+        self.split.setSizes([600, 500])
+        main.addWidget(QLabel("Execution log"))
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(2000)
+        self.log_view.setMaximumHeight(150)
+        main.addWidget(self.log_view)
+        self.statusBar().showMessage("Connect an Android device or start an emulator, then press Refresh.")
 
-        bottom = ttk.LabelFrame(main, text="Execution log", padding=10)
-        bottom.pack(fill="x", pady=(16, 0))
-        self.log_view = tk.Text(bottom, height=6, bg="#ffffff", fg="#323130", insertbackground="#323130", selectbackground="#cce4f7", selectforeground="#1a1a1a", relief="flat", borderwidth=0, highlightthickness=0, padx=10, pady=8, font=("Consolas", 10), state="disabled")
-        log_scroll = ttk.Scrollbar(bottom, orient="vertical", command=self.log_view.yview)
-        self.log_view.configure(yscrollcommand=log_scroll.set)
-        log_scroll.pack(side="right", fill="y")
-        self.log_view.pack(side="left", fill="both", expand=True)
-        self.status = tk.StringVar(value="Idle — connect Android device or start an emulator, then press Refresh.")
-        ttk.Label(main, textvariable=self.status, style="Muted.TLabel").pack(anchor="w", pady=(10, 0))
-        self.refresh_devices()
+    def change_appearance(self, _value=None, *, persist=True):
+        value = self.appearance.currentText()
+        scheme = {"System": Qt.ColorScheme.Unknown, "Light": Qt.ColorScheme.Light, "Dark": Qt.ColorScheme.Dark}[value]
+        QApplication.styleHints().setColorScheme(scheme)
+        self.platform_style.set_appearance(value)
+        if persist:
+            try:
+                save_appearance(value)
+            except OSError as exc:
+                self.logging(f"Could not save appearance: {exc}")
 
-    def logging(self, msg):
-        self.messages.put(("log", str(msg)))
+    def logging(self, message):
+        self.messages.put(("log", str(message)))
+
+    def start_hotkey(self):
+        # Import lazily: pynput can fail on Linux without X or on restricted hosts.
+        if sys.platform.startswith("linux") and os.environ.get("WAYLAND_DISPLAY"):
+            self.hotkey_status.setText("Wayland: use STOP or F8 with this app focused")
+            return
+        try:
+            from pynput import keyboard
+            def pressed(key):
+                if key == keyboard.Key.f8:
+                    self.stop_event.set()
+            self.hotkey_listener = keyboard.Listener(on_press=pressed)
+            if not getattr(self.hotkey_listener, "IS_TRUSTED", True):
+                self.hotkey_status.setText("Global F8 needs OS permission; focused F8 and STOP remain available")
+                self.hotkey_listener = None
+                return
+            self.hotkey_listener.daemon = True
+            self.hotkey_listener.start()
+            self.hotkey_status.setText("Global F8 emergency stop enabled")
+        except Exception as exc:
+            self.hotkey_status.setText("Global F8 unavailable; use STOP or focused F8")
+            self.logging(f"Global hotkey unavailable: {exc}")
+
+    def background(self, label, work, success):
+        if self.busy or self.running or self.closing:
+            return
+        self.busy = True
+        self.set_controls()
+        self.statusBar().showMessage(label)
+        def worker():
+            try:
+                result = work()
+                self.messages.put(("result", (success, result, None)))
+            except Exception as exc:
+                self.messages.put(("result", (success, None, str(exc))))
+        self.launch(worker)
+
+    def launch(self, worker):
+        thread = threading.Thread(target=worker, daemon=True)
+        self.workers.append(thread)
+        thread.start()
+
+    def set_controls(self):
+        available = not (self.running or self.busy or self.closing)
+        self.device_panel.setEnabled(available)
+        self.start_btn.setEnabled(available)
+        self.stop_btn.setEnabled(self.running and not self.closing)
+        self.split.setEnabled(available)
+        for action in self.file_actions:
+            action.setEnabled(available)
+        for button in self.file_buttons:
+            button.setEnabled(available)
 
     def process_messages(self):
-        try:
-            while True:
+        for _ in range(200):
+            try:
                 event, value = self.messages.get_nowait()
-                if event == "log":
-                    self.log_view.configure(state="normal")
-                    self.log_view.insert("end", value + "\n")
-                    self.log_view.see("end")
-                    self.log_view.configure(state="disabled")
-                elif event == "step":
-                    if self.tree.exists(value):
-                        self.tree.selection_set(value)
-                        self.tree.see(value)
-                    self.status.set(f"Running step {value} — F8 to stop")
-                elif event == "done":
-                    self.running = False
-                    self.start_btn.configure(state="normal")
-                    self.status.set(value)
-                elif event == "system_theme":
-                    self.system_theme = value
-                    if self.appearance.get() == "System" and self.active_theme != value:
-                        self.apply_appearance()
-        except queue.Empty:
-            pass
-        self.after(100, self.process_messages)
-
-    def global_key(self, key):
-        if key == keyboard.Key.f8:
-            # Listener runs off the Tk main thread: only set the thread-safe event.
-            self.stop_event.set()
-            if self.running:
-                self.messages.put(("log", "Global F8 emergency stop requested"))
-
-    def connect_mumu(self):
-        port = simpledialog.askstring("Connect MuMu", "ADB port shown in MuMu Issues Diagnostic / multi-instance manager:", initialvalue="16384", parent=self)
-        if port is None:
-            return
-        port = port.strip()
-        if not port.isdigit() or not 1 <= int(port) <= 65535:
-            messagebox.showerror("Invalid port", "Enter a valid numeric port (1-65535)")
-            return
-        serial = f"127.0.0.1:{port}"
-        try:
-            result = ADB().command("connect", serial)
-            self.logging(result.strip())
-            self.refresh_devices()
-            if serial in self.device_combo.cget("values"):
-                self.device.set(serial)
-            else:
-                messagebox.showwarning("Connection not ready", f"{serial} did not appear as a connected device. Check the ADB port in MuMu and try again.")
-        except AutomationError as exc:
-            messagebox.showerror("ADB failed", str(exc))
-
-    def current_adb(self):
-        return ADB(serial=self.device.get().strip())
+            except queue.Empty:
+                break
+            if event == "log":
+                self.log_view.appendPlainText(value)
+            elif event == "step":
+                for i in range(self.tree.topLevelItemCount()):
+                    item = self.tree.topLevelItem(i)
+                    if item.text(0) == value:
+                        self.tree.setCurrentItem(item)
+                        self.tree.scrollToItem(item)
+                self.statusBar().showMessage(f"Running {value} — F8 to stop")
+            elif event == "done":
+                self.running = False
+                self.set_controls()
+                self.statusBar().showMessage(value)
+            elif event == "result":
+                callback, result, error = value
+                self.busy = False
+                self.set_controls()
+                if not self.closing:
+                    self.statusBar().showMessage("Ready" if error is None else "Device operation failed")
+                    if error:
+                        self.logging(error)
+                        QMessageBox.warning(self, "Device operation failed", error)
+                    else:
+                        callback(result)
+        self.workers = [thread for thread in self.workers if thread.is_alive()]
+        if self.closing and not self.workers:
+            self.close()
 
     def refresh_devices(self):
-        try:
-            found = ADB().devices()
-            self.device_combo.configure(values=found)
-            if found and self.device.get() not in found:
-                self.device.set(found[0])
-            self.logging("Devices: " + (", ".join(found) or "none connected"))
-        except AutomationError as exc:
-            self.logging(str(exc))
+        self.background("Looking for devices…", lambda: ADB().devices(), self.devices_found)
 
-    def refresh_tree(self, select=None):
-        for item in self.tree.get_children():
-            self.tree.delete(item)
+    def devices_found(self, devices, preferred=None):
+        selected = preferred or self.device.currentText()
+        self.device.clear()
+        self.device.addItems(devices)
+        if selected in devices:
+            self.device.setCurrentText(selected)
+        self.logging("Devices: " + (", ".join(devices) or "none connected"))
+
+    def connect_mumu(self):
+        if self.busy or self.running:
+            return
+        port, ok = QInputDialog.getInt(self, "Connect MuMu", "ADB port from MuMu Issues Diagnostic:", 16384, 1, 65535)
+        if not ok:
+            return
+        serial = f"127.0.0.1:{port}"
+        def connect():
+            adb = ADB()
+            result = adb.command("connect", serial)
+            return result, adb.devices()
+        def connected(result):
+            message, devices = result
+            self.logging(message.strip())
+            self.devices_found(devices, serial)
+            if serial not in devices:
+                QMessageBox.warning(self, "Connection not ready", f"{serial} is not connected. Check the emulator's ADB port.")
+        self.background("Connecting to emulator…", connect, connected)
+
+    def current_adb(self):
+        serial = self.device.currentText().strip()
+        if not serial:
+            raise AutomationError("Choose a connected ADB device first")
+        return ADB(serial=serial)
+
+    def capture(self):
+        if self.busy or self.running:
+            return
+        try:
+            adb = self.current_adb()
+        except AutomationError as exc:
+            QMessageBox.warning(self, "No device", str(exc))
+            return
+        self.background("Capturing device screen…", adb.screenshot, self.captured)
+
+    def captured(self, image):
+        target, _ = QFileDialog.getSaveFileName(self, "Save template", str(TEMPLATES / "target.png"), "PNG (*.png)")
+        if target and CropDialog(self, image, Path(target)).exec() == QDialog.DialogCode.Accepted:
+            self.vars["image"].setText(self.relative_image(Path(target)))
+
+    def refresh_tree(self, selected=None):
+        self.tree.blockSignals(True)
+        self.tree.clear()
         for step in self.steps:
-            transitions = []
-            for field, tag in [("on_true", "✓"), ("on_false", "✗"), ("next", "→")]:
-                if step.get(field):
-                    transitions.append(f"{tag} {step[field]}")
-            self.tree.insert("", "end", iid=step["id"], text=step["id"], values=(step["type"], "  ".join(transitions) or "↓ next row"))
-        if select and self.tree.exists(select):
-            self.tree.selection_set(select)
+            flow = [f"{tag} {step[field]}" for field, tag in [("on_true", "✓"), ("on_false", "✗"), ("next", "→")] if step.get(field)]
+            item = QTreeWidgetItem([step["id"], step["type"], "  ".join(flow) or "↓ next row"])
+            self.tree.addTopLevelItem(item)
+            if step["id"] == selected:
+                self.tree.setCurrentItem(item)
+        self.tree.blockSignals(False)
+        self.on_select()
 
     def get_selected(self):
-        selected = self.tree.selection()
-        return next((s for s in self.steps if selected and s["id"] == selected[0]), None)
+        item = self.tree.currentItem()
+        return next((step for step in self.steps if item and step["id"] == item.text(0)), None)
+
+    def set_value(self, name, value):
+        widget = self.vars[name]
+        widget.blockSignals(True)
+        if isinstance(widget, QComboBox):
+            widget.setCurrentText(str(value))
+        elif isinstance(widget, QCheckBox):
+            widget.setChecked(bool(value))
+        else:
+            widget.setText(",".join(map(str, value)) if isinstance(value, (list, tuple)) else str(value))
+        widget.blockSignals(False)
 
     def on_select(self):
         step = self.get_selected()
-        self.current = step["id"] if step else None
-        if not step:
-            return
         for name in self.vars:
-            self.vars[name].set(str(step.get(name, "")))
-        self.show_fields(step["type"])
+            self.set_value(name, step.get(name, "") if step else "")
+        self.show_fields(step["type"] if step else "stop")
 
     def show_fields(self, kind):
-        for widget in self.widgets.values():
-            widget.pack_forget()
-        for name in ["id", "type", *FIELDS_BY_TYPE.get(kind, [])]:
-            self.widgets[name].pack(fill="x", pady=4, padx=3)
+        visible = {"id", "type", *FIELDS_BY_TYPE.get(kind, [])}
+        for name, row in self.rows.items():
+            self.form.setRowVisible(row, name in visible)
 
-    def change_type(self):
-        self.show_fields(self.vars["type"].get())
+    def change_type(self, kind):
+        for name, value in DEFAULTS[kind].items():
+            self.set_value(name, value)
+        self.show_fields(kind)
 
     def apply(self):
+        if self.running or self.busy:
+            return False
         step = self.get_selected()
-        if not step:
+        if step is None:
             return False
-        kind = self.vars["type"].get()
-        identifier = self.vars["id"].get().strip()
-        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_\-]*", identifier):
-            messagebox.showerror("Invalid ID", "Use letters, digits, underscores or hyphens, starting with a letter.")
-            return False
-        if identifier != step["id"] and any(s["id"] == identifier for s in self.steps):
-            messagebox.showerror("Duplicate ID", "Another step already has that ID")
-            return False
-        new = {"id": identifier, "type": kind, **copy.deepcopy(DEFAULTS[kind])}
-        numeric = {"threshold": float, "retry_delay": float, "seconds": float, "retries": int, "x": int, "y": int, "x2": int, "y2": int, "duration": int, "offset_x": int, "offset_y": int}
+        kind = self.vars["type"].currentText()
+        identifier = self.vars["id"].text().strip()
         try:
+            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_\-]*", identifier):
+                raise ValueError("Step ID must start with a letter and contain letters, digits, underscores or hyphens.")
+            if any(s is not step and s["id"] == identifier for s in self.steps):
+                raise ValueError("Another step already has that ID")
+            updated = {"id": identifier, "type": kind}
+            numeric = {"threshold": float, "retry_delay": float, "seconds": float, "retries": int,
+                       **{key: int for key in ("x", "y", "x2", "y2", "duration", "offset_x", "offset_y")}}
             for name in FIELDS_BY_TYPE[kind]:
-                raw = self.vars[name].get().strip()
+                widget = self.vars[name]
                 if name == "click_match":
-                    new[name] = raw == "True"
-                elif name == "region":
-                    new[name] = [int(s.strip()) for s in raw.split(",")] if raw else ""
-                    if new[name] and len(new[name]) != 4:
-                        raise ValueError("Region must have four numbers")
-                elif name in numeric:
-                    new[name] = numeric[name](raw)
+                    value = widget.isChecked()
                 else:
-                    new[name] = raw
-            if kind == "find_image" and not (0 < new["threshold"] <= 1):
-                raise ValueError("Similarity must be between 0 and 1")
-            if kind == "find_image" and new["retries"] < 1:
-                raise ValueError("Attempts must be at least 1")
+                    raw = widget.text() if name == "text" else widget.text().strip()
+                    if name == "region":
+                        value = [int(part.strip()) for part in raw.split(",")] if raw else ""
+                        if value and (len(value) != 4 or value[2] <= 0 or value[3] <= 0):
+                            raise ValueError("Region must be x,y,width,height with positive dimensions")
+                    elif name in numeric:
+                        value = numeric[name](raw)
+                        if not math.isfinite(value):
+                            raise ValueError(f"{name} must be finite")
+                    else:
+                        value = raw
+                updated[name] = value
+            if kind == "find_image" and (not 0 < updated["threshold"] <= 1 or updated["retries"] < 1):
+                raise ValueError("Similarity must be greater than 0 and at most 1; attempts must be at least 1")
+            for name in ("seconds", "retry_delay", "duration"):
+                if updated.get(name, 0) < 0:
+                    raise ValueError(f"{name} cannot be negative")
         except ValueError as exc:
-            messagebox.showerror("Invalid value", str(exc))
+            QMessageBox.warning(self, "Invalid step", str(exc))
             return False
         old_id = step["id"]
         step.clear()
-        step.update(new)
+        step.update(updated)
         if old_id != identifier:
-            for s in self.steps:
-                for key in ("next", "on_true", "on_false"):
-                    if s.get(key) == old_id:
-                        s[key] = identifier
+            for other in self.steps:
+                for branch in ("next", "on_true", "on_false"):
+                    if other.get(branch) == old_id:
+                        other[branch] = identifier
         self.refresh_tree(identifier)
-        self.logging(f"Updated {identifier}")
         return True
 
     def add_step(self):
-        step = new_step(self.kind.get(), {s["id"] for s in self.steps})
+        step = new_step(self.kind.currentText(), {s["id"] for s in self.steps})
         selected = self.get_selected()
-        index = self.steps.index(selected) + 1 if selected else len(self.steps)
-        self.steps.insert(index, step)
+        self.steps.insert(self.steps.index(selected) + 1 if selected else len(self.steps), step)
         self.refresh_tree(step["id"])
-        self.on_select()
 
     def clone_step(self):
         selected = self.get_selected()
-        if not selected:
-            return
-        step = copy.deepcopy(selected)
-        step["id"] = new_step(step["type"], {s["id"] for s in self.steps})["id"]
-        self.steps.insert(self.steps.index(selected) + 1, step)
-        self.refresh_tree(step["id"])
-        self.on_select()
+        if selected:
+            step = copy.deepcopy(selected)
+            step["id"] = new_step(step["type"], {s["id"] for s in self.steps})["id"]
+            self.steps.insert(self.steps.index(selected) + 1, step)
+            self.refresh_tree(step["id"])
 
     def delete_step(self):
         selected = self.get_selected()
         if not selected:
             return
-        if any(s is not selected and selected["id"] in [s.get("next"), s.get("on_true"), s.get("on_false")] for s in self.steps):
-            messagebox.showwarning("Referenced step", "Remove incoming branch links before deleting this step")
+        if any(s is not selected and selected["id"] in [s.get(k) for k in ("next", "on_true", "on_false")] for s in self.steps):
+            QMessageBox.warning(self, "Referenced step", "Remove incoming branch links before deleting this step")
             return
         self.steps.remove(selected)
         self.refresh_tree(self.steps[0]["id"] if self.steps else None)
-        self.on_select()
 
     def move(self, direction):
         selected = self.get_selected()
-        if not selected:
-            return
-        index = self.steps.index(selected)
-        other = index + direction
-        if 0 <= other < len(self.steps):
-            self.steps[index], self.steps[other] = self.steps[other], self.steps[index]
-            self.refresh_tree(selected["id"])
+        if selected:
+            index = self.steps.index(selected)
+            other = index + direction
+            if 0 <= other < len(self.steps):
+                self.steps[index], self.steps[other] = self.steps[other], self.steps[index]
+                self.refresh_tree(selected["id"])
 
     def show_ids(self):
-        messagebox.showinfo("Available step IDs", "\n".join(s["id"] for s in self.steps))
-
-    def browse_image(self):
-        path = filedialog.askopenfilename(filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp")])
-        if path:
-            self.vars["image"].set(self.relative_image(Path(path)))
+        QMessageBox.information(self, "Step IDs", "\n".join(s["id"] for s in self.steps))
 
     def relative_image(self, path):
-        try:
-            return str(path.relative_to(self.workflow_path.parent))
-        except ValueError:
-            return str(path)
+        return Path(os.path.relpath(path, self.workflow_path.parent)).as_posix() if path.anchor == self.workflow_path.anchor else str(path)
 
-    def capture(self):
-        try:
-            self.status.set("Capturing device screen...")
-            self.update_idletasks()
-            image = self.current_adb().screenshot()
-        except AutomationError as exc:
-            messagebox.showerror("Screenshot failed", str(exc))
-            return
-        target = filedialog.asksaveasfilename(initialdir=TEMPLATES, initialfile="target.png", defaultextension=".png", filetypes=[("PNG", "*.png")])
-        if target:
-            CropDialog(self, image, Path(target), lambda path: self.vars["image"].set(self.relative_image(path)))
-        self.status.set("Ready")
-
-    def save(self):
-        if self.get_selected() and not self.apply():
-            return
-        try:
-            save_workflow(self.workflow_path, self.steps)
-            self.logging(f"Saved: {self.workflow_path}")
-        except (AutomationError, OSError) as exc:
-            messagebox.showerror("Save error", str(exc))
-
-    def save_as(self):
-        path = filedialog.asksaveasfilename(initialdir=self.workflow_path.parent, defaultextension=".json", filetypes=[("Workflow JSON", "*.json")])
+    def browse_image(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Template image", str(self.workflow_path.parent), "Images (*.png *.jpg *.jpeg *.bmp)")
         if path:
-            # Keep existing templates pointing to the same file if the folder changes.
-            old_folder = self.workflow_path.parent
-            for step in self.steps:
+            self.vars["image"].setText(self.relative_image(Path(path)))
+
+    def write_workflow(self, target):
+        snapshot = copy.deepcopy(self.steps)
+        if target.parent != self.workflow_path.parent:
+            for step in snapshot:
                 image = step.get("image")
                 if image and not Path(image).is_absolute():
-                    step["image"] = str((old_folder / image).resolve())
-            self.workflow_path = Path(path)
-            self.save()
+                    step["image"] = str((self.workflow_path.parent / image).resolve())
+        try:
+            validate(snapshot)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            save_workflow(target, snapshot)
+        except (OSError, AutomationError) as exc:
+            QMessageBox.warning(self, "Save failed", str(exc))
+            return False
+        self.steps = snapshot
+        self.workflow_path = target
+        self.on_select()
+        self.logging(f"Saved: {target}")
+        return True
+
+    def save(self):
+        if self.running or self.busy or (self.get_selected() and not self.apply()):
+            return
+        self.write_workflow(self.workflow_path)
+
+    def save_as(self):
+        if self.running or self.busy or (self.get_selected() and not self.apply()):
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Save workflow", str(self.workflow_path), "Workflow JSON (*.json)")
+        if path:
+            self.write_workflow(Path(path))
 
     def open_file(self):
-        path = filedialog.askopenfilename(filetypes=[("Workflow JSON", "*.json")])
+        if self.running or self.busy:
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "Open workflow", str(self.workflow_path.parent), "Workflow JSON (*.json)")
         if not path:
             return
         try:
             steps = load_workflow(Path(path))
-        except (AutomationError, OSError, ValueError, KeyError) as exc:
-            messagebox.showerror("Open error", str(exc))
+        except (OSError, ValueError, AutomationError, KeyError, TypeError, AttributeError) as exc:
+            QMessageBox.warning(self, "Open failed", str(exc))
             return
-        self.workflow_path = Path(path)
-        self.steps = steps
+        self.steps, self.workflow_path = steps, Path(path)
         self.refresh_tree(steps[0]["id"])
-        self.on_select()
-        self.logging(f"Loaded: {path}")
 
     def run(self):
-        if self.running:
+        if self.running or self.busy or self.closing:
             return
         if self.get_selected() and not self.apply():
             return
-        if not self.device.get().strip():
-            messagebox.showwarning("No device", "Choose a connected ADB device first")
-            return
         try:
-            from engine import validate
             validate(self.steps)
+            adb = self.current_adb()
         except AutomationError as exc:
-            messagebox.showerror("Workflow error", str(exc))
+            QMessageBox.warning(self, "Cannot run", str(exc))
             return
         self.stop_event.clear()
         self.running = True
-        self.start_btn.configure(state="disabled")
-        snapshot = copy.deepcopy(self.steps)
-        adb = self.current_adb()
-        folder = self.workflow_path.parent
-        self.logging("========== Starting workflow ==========")
+        self.set_controls()
+        snapshot, folder = copy.deepcopy(self.steps), self.workflow_path.parent
         def worker():
             status = "Completed"
             try:
@@ -587,25 +646,51 @@ class Editor(tk.Tk):
                              lambda step_id: self.messages.put(("step", step_id)))
             except InterruptedError:
                 status = "Stopped by user"
-                self.logging(status)
             except Exception as exc:
                 status = "Failed — see execution log"
                 self.logging(f"ERROR: {exc}")
             finally:
                 self.messages.put(("done", status))
-        threading.Thread(target=worker, daemon=True).start()
+        self.launch(worker)
 
     def stop(self):
         if self.running:
             self.stop_event.set()
-            self.logging("Emergency stop requested. Current ADB call may take up to its timeout to return.")
+            self.statusBar().showMessage("Stopping after the current ADB operation…")
 
-    def close(self):
-        self.theme_stop.set()
+    def closeEvent(self, event):
         self.stop_event.set()
-        self.hotkey_listener.stop()
-        self.destroy()
+        if self.hotkey_listener:
+            self.hotkey_listener.stop()
+            self.hotkey_listener = None
+        if any(thread.is_alive() for thread in self.workers):
+            self.closing = True
+            self.set_controls()
+            self.statusBar().showMessage("Stopping device operations before closing…")
+            event.ignore()
+            return
+        self.timer.stop()
+        self.platform_style.close()
+        event.accept()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--smoke-test", action="store_true", help="Initialize Qt without device access and exit")
+    args = parser.parse_args()
+    app = QApplication(sys.argv)
+    app.setApplicationName("AndroidVisualAutoclicker")
+    app.setOrganizationName("AndroidVisualAutoclicker")
+    window = Editor(startup=not args.smoke_test)
+    if args.smoke_test:
+        window.ensurePolished()
+        if window.grab().isNull():
+            return 1
+        QTimer.singleShot(50, app.quit)
+    else:
+        window.show()
+    return app.exec()
 
 
 if __name__ == "__main__":
-    Editor().mainloop()
+    sys.exit(main())

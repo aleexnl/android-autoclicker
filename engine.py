@@ -7,9 +7,8 @@ import re
 import subprocess
 import sys
 import threading
-import time
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable
 
 import cv2
 import numpy as np
@@ -24,8 +23,13 @@ class ADB:
     def __init__(self, serial: str = "", executable: str = "adb", timeout: int = 12):
         self.serial = serial
         folder = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
-        portable_adb = folder / "platform-tools" / "adb.exe"
-        self.executable = str(portable_adb) if executable == "adb" and portable_adb.is_file() else executable
+        filename = "adb.exe" if sys.platform == "win32" else "adb"
+        folders = [folder]
+        if sys.platform == "darwin" and folder.name == "MacOS" and folder.parent.name == "Contents":
+            folders.insert(0, folder.parent.parent.parent)  # Beside the .app bundle.
+        portable_adb = next((base / "platform-tools" / filename for base in folders
+                             if (base / "platform-tools" / filename).is_file()), None)
+        self.executable = str(portable_adb) if executable == "adb" and portable_adb else executable
         self.timeout = timeout
 
     def command(self, *parts: str, binary: bool = False):
@@ -74,7 +78,15 @@ class ADB:
         self.command("shell", "input", "text", escaped)
 
 
-def match_image(screen: Image.Image, template: Image.Image, threshold: float = 0.88, region=None):
+def prepare_template(template: Image.Image):
+    """Convert and validate once; callers can reuse the prepared template."""
+    tpl = cv2.cvtColor(np.array(template.convert("RGB")), cv2.COLOR_RGB2GRAY)
+    if float(tpl.std()) < 1.0:
+        raise AutomationError("Template has too little visual detail; capture a larger area")
+    return tpl
+
+
+def match_image(screen: Image.Image, template: Image.Image | np.ndarray, threshold: float = 0.88, region=None):
     """Return (score, absolute center x, absolute center y), or (score, None, None)."""
     full = np.array(screen.convert("RGB"))
     xoffset = yoffset = 0
@@ -84,14 +96,10 @@ def match_image(screen: Image.Image, template: Image.Image, threshold: float = 0
             raise AutomationError("Search region width and height must be positive")
         xoffset, yoffset = max(x, 0), max(y, 0)
         full = full[yoffset:max(yoffset, y + h), xoffset:max(xoffset, x + w)]
-    small = np.array(template.convert("RGB"))
-    if not full.size or small.shape[0] > full.shape[0] or small.shape[1] > full.shape[1]:
+    tpl = prepare_template(template) if isinstance(template, Image.Image) else template
+    if not full.size or tpl.shape[0] > full.shape[0] or tpl.shape[1] > full.shape[1]:
         return 0.0, None, None
     img = cv2.cvtColor(full, cv2.COLOR_RGB2GRAY)
-    tpl = cv2.cvtColor(small, cv2.COLOR_RGB2GRAY)
-    if float(tpl.std()) < 1.0:
-        # Constant templates are unsuitable for normalized correlation.
-        raise AutomationError("Template has too little visual detail; capture a larger area")
     scores = cv2.matchTemplate(img, tpl, cv2.TM_CCOEFF_NORMED)
     _, highest, _, position = cv2.minMaxLoc(scores)
     if highest < threshold:
@@ -125,6 +133,7 @@ def run_workflow(steps: list[dict], adb: ADB, folder: Path, stop_event: threadin
     order = {step["id"]: steps[i + 1]["id"] if i + 1 < len(steps) else "" for i, step in enumerate(steps)}
     current = steps[0]["id"]
     executions = 0
+    templates = {}  # Per-run cache: the next run always picks up edited images.
 
     def pause(seconds: float):
         if stop_event.wait(max(0.0, seconds)):
@@ -159,7 +168,11 @@ def run_workflow(steps: list[dict], adb: ADB, folder: Path, stop_event: threadin
                 path = folder / path
             if not path.is_file():
                 raise AutomationError(f"Template not found: {path}")
-            template = Image.open(path).convert("RGB")
+            path = path.resolve()
+            if path not in templates:
+                with Image.open(path) as image:
+                    templates[path] = prepare_template(image)
+            template = templates[path]
             threshold = float(step.get("threshold", 0.88))
             retries = max(1, int(step.get("retries", 5)))
             delay = max(0.0, float(step.get("retry_delay", 0.8)))
@@ -169,6 +182,8 @@ def run_workflow(steps: list[dict], adb: ADB, folder: Path, stop_event: threadin
                 if stop_event.is_set():
                     raise InterruptedError("Stopped by user")
                 score, center_x, center_y = match_image(adb.screenshot(), template, threshold, region)
+                if stop_event.is_set():
+                    raise InterruptedError("Stopped by user")
                 log(f"  attempt {attempt}/{retries}, similarity {score:.3f}")
                 if center_x is not None:
                     found = True

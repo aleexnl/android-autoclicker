@@ -7,14 +7,18 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Creating the build environment failed.' }
     }
     $buildPython = Join-Path $PSScriptRoot '.venv-build\Scripts\python.exe'
+    # Replace the old GUI-enabled OpenCV package in pre-migration build environments.
+    $legacyOpenCV = & $buildPython -c "from importlib.metadata import distributions; print(int(any(d.metadata['Name'] == 'opencv-python' for d in distributions())))"
+    if ($legacyOpenCV -eq '1') {
+        # Both distributions share cv2 files, so reinstall headless after removal.
+        & $buildPython -m pip uninstall -y opencv-python opencv-python-headless
+        if ($LASTEXITCODE -ne 0) { throw 'Removing old OpenCV failed.' }
+    }
     & $buildPython -m pip install -r requirements-build.txt
     if ($LASTEXITCODE -ne 0) { throw 'Installing build dependencies failed.' }
-    & $buildPython -m PyInstaller --noconfirm --clean --onefile --windowed --noupx `
-        --name AndroidVisualAutoclicker --specpath build `
-        --collect-data sv_ttk `
-        --hidden-import pynput.keyboard._win32 --hidden-import pynput.mouse._win32 app.py
+    & $buildPython build_app.py
     if ($LASTEXITCODE -ne 0) { throw 'Building the executable failed.' }
-    Write-Host 'Ready: dist\AndroidVisualAutoclicker.exe'
+    Write-Host 'Ready: dist\AndroidVisualAutoclicker\AndroidVisualAutoclicker.exe (distribute the entire folder)'
 } finally {
     Pop-Location
 }
