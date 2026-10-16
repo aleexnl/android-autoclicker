@@ -2,21 +2,26 @@
 from __future__ import annotations
 
 import copy
+import os
 import queue
 import re
+import sys
 import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from pynput import keyboard
+import sv_ttk
 
 from PIL import Image, ImageTk
 
 from engine import ADB, AutomationError, load_workflow, run_workflow, save_workflow
 
 ROOT = Path(__file__).resolve().parent
+if getattr(sys, "frozen", False):
+    ROOT = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "AndroidVisualAutoclicker"
 TEMPLATES = ROOT / "templates"
-TEMPLATES.mkdir(exist_ok=True)
+TEMPLATES.mkdir(parents=True, exist_ok=True)
 
 FIELDS = [
     ("id", "Step ID"), ("type", "Action"), ("image", "Image file"),
@@ -107,9 +112,16 @@ class CropDialog(tk.Toplevel):
 class Editor(tk.Tk):
     def __init__(self):
         super().__init__()
+        sv_ttk.set_theme("light")
+        style = ttk.Style(self)
+        style.configure("Title.TLabel", font=("Segoe UI", 20, "bold"))
+        style.configure("Section.TLabel", font=("Segoe UI", 12, "bold"))
+        style.configure("Muted.TLabel", foreground="#616161")
+        style.configure("Treeview", rowheight=34)
+        style.configure("Compact.TButton", padding=(8, 5), width=3)
         self.title("Android Visual Autoclicker — ADB Workflow Studio")
-        self.geometry("1210x780")
-        self.minsize(960, 620)
+        self.geometry("1280x860")
+        self.minsize(1100, 720)
         self.workflow_path = ROOT / "example_workflow.json"
         self.steps = [new_step("find_image", set()), new_step("wait", {"step_1"}), new_step("stop", {"step_1", "step_2"})]
         self.current = None
@@ -132,11 +144,16 @@ class Editor(tk.Tk):
         self.hotkey_listener.start()
 
     def _build(self):
-        self.configure(bg="#eef2f7")
-        main = ttk.Frame(self, padding=12)
+        main = ttk.Frame(self, padding=20)
         main.pack(fill="both", expand=True)
+        header = ttk.Frame(main)
+        header.pack(fill="x", pady=(0, 16))
+        ttk.Label(header, text="Workflow Studio", style="Title.TLabel").pack(side="left")
+        ttk.Button(header, text="Save as", command=self.save_as).pack(side="right")
+        ttk.Button(header, text="Save", command=self.save).pack(side="right", padx=6)
+        ttk.Button(header, text="Open", command=self.open_file).pack(side="right")
         toolbar = ttk.Frame(main)
-        toolbar.pack(fill="x", pady=(0, 10))
+        toolbar.pack(fill="x", pady=(0, 16))
         ttk.Label(toolbar, text="Device:").pack(side="left")
         self.device = tk.StringVar()
         self.device_combo = ttk.Combobox(toolbar, textvariable=self.device, width=23)
@@ -144,11 +161,7 @@ class Editor(tk.Tk):
         ttk.Button(toolbar, text="Refresh", command=self.refresh_devices).pack(side="left")
         ttk.Button(toolbar, text="Connect MuMu", command=self.connect_mumu).pack(side="left", padx=4)
         ttk.Button(toolbar, text="Capture template", command=self.capture).pack(side="left", padx=8)
-        ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=8)
-        ttk.Button(toolbar, text="Open", command=self.open_file).pack(side="left")
-        ttk.Button(toolbar, text="Save", command=self.save).pack(side="left", padx=5)
-        ttk.Button(toolbar, text="Save as", command=self.save_as).pack(side="left")
-        self.start_btn = ttk.Button(toolbar, text="▶ Run (F6)", command=self.run)
+        self.start_btn = ttk.Button(toolbar, text="▶ Run (F6)", style="Accent.TButton", command=self.run)
         self.start_btn.pack(side="right", padx=4)
         self.stop_btn = ttk.Button(toolbar, text="■ STOP (F8)", command=self.stop)
         self.stop_btn.pack(side="right", padx=4)
@@ -156,36 +169,46 @@ class Editor(tk.Tk):
 
         split = ttk.Panedwindow(main, orient="horizontal")
         split.pack(fill="both", expand=True)
-        left = ttk.Frame(split)
-        right = ttk.Frame(split)
+        left = ttk.Frame(split, padding=(0, 0, 12, 0))
+        right = ttk.Frame(split, padding=(12, 0, 0, 0))
         split.add(left, weight=5)
         split.add(right, weight=4)
-        ttk.Label(left, text="WORKFLOW STEPS — drag not required; use ↑ ↓", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 7))
-        self.tree = ttk.Treeview(left, columns=("action", "flow"), show="tree headings", selectmode="browse")
+        ttk.Label(left, text="Workflow steps", style="Section.TLabel").pack(anchor="w", pady=(0, 12))
+        tree_frame = ttk.Frame(left)
+        tree_frame.pack(fill="both", expand=True)
+        self.tree = ttk.Treeview(tree_frame, columns=("action", "flow"), show="tree headings", selectmode="browse")
         self.tree.heading("#0", text="ID")
         self.tree.heading("action", text="Action")
         self.tree.heading("flow", text="Transitions")
         self.tree.column("#0", width=125, stretch=False)
         self.tree.column("action", width=112, stretch=False)
         self.tree.column("flow", width=220)
-        self.tree.pack(fill="both", expand=True)
+        tree_scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=tree_scroll.set)
+        tree_scroll.pack(side="right", fill="y")
+        self.tree.pack(side="left", fill="both", expand=True)
         self.tree.bind("<<TreeviewSelect>>", lambda _e: self.on_select())
         row = ttk.Frame(left)
         row.pack(fill="x", pady=7)
         self.kind = tk.StringVar(value="find_image")
         ttk.Combobox(row, textvariable=self.kind, values=list(DEFAULTS), state="readonly", width=15).pack(side="left")
         for label, command in [("+ Add", self.add_step), ("Clone", self.clone_step), ("Delete", self.delete_step), ("↑", lambda: self.move(-1)), ("↓", lambda: self.move(1))]:
-            ttk.Button(row, text=label, command=command).pack(side="left", padx=2)
-        ttk.Label(left, text="Branches refer to step IDs. Blank next = following row.\nAfter image retries: found → true; missing → false.\nThe highlighted row shows the executing step.", foreground="#596579", justify="left").pack(anchor="w")
+            ttk.Button(row, text=label, command=command, style="Compact.TButton" if label in {"↑", "↓"} else "TButton", width=3 if label in {"↑", "↓"} else 6).pack(side="left", padx=2)
+        ttk.Label(left, text="Use ↑ ↓ to reorder. Branches refer to step IDs.\nBlank next continues to the following row.\nThe highlighted row shows the executing step.", style="Muted.TLabel", justify="left").pack(anchor="w", pady=(4, 0))
 
-        ttk.Label(right, text="STEP CONFIGURATION", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 7))
-        canvas = tk.Canvas(right, highlightthickness=0)
+        ttk.Label(right, text="Step configuration", style="Section.TLabel").pack(anchor="w", pady=(0, 12))
+        canvas = tk.Canvas(right, highlightthickness=0, bg=ttk.Style(self).lookup("TFrame", "background"))
         scrollbar = ttk.Scrollbar(right, orient="vertical", command=canvas.yview)
         self.form = ttk.Frame(canvas)
         self.form.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.create_window((0, 0), window=self.form, anchor="nw", tags="content")
         canvas.bind("<Configure>", lambda e: canvas.itemconfigure("content", width=e.width))
         canvas.configure(yscrollcommand=scrollbar.set)
+        # Scope wheel scrolling to this editor, preserving dropdown/list scrolling.
+        def scroll_form(event):
+            if event.widget.winfo_class() != "TCombobox" and str(event.widget).startswith(str(right)):
+                canvas.yview_scroll(-int(event.delta / 120), "units")
+        self.bind("<MouseWheel>", scroll_form, add="+")
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
         for n, (name, label) in enumerate(FIELDS):
@@ -208,14 +231,17 @@ class Editor(tk.Tk):
                 ttk.Button(wrap, text="Clear", command=lambda: self.vars["region"].set("")).pack(side="right")
             if name in {"on_true", "on_false", "next"}:
                 ttk.Button(wrap, text="IDs", command=self.show_ids).pack(side="right")
-        ttk.Button(self.form, text="Apply changes to selected step", command=self.apply).pack(fill="x", padx=8, pady=12)
+        ttk.Button(self.form, text="Apply changes to selected step", style="Accent.TButton", command=self.apply).pack(fill="x", padx=8, pady=12)
 
-        bottom = ttk.LabelFrame(main, text="Execution log")
-        bottom.pack(fill="x", pady=(10, 0))
-        self.log_view = tk.Text(bottom, height=8, bg="#111827", fg="#d1fae5", insertbackground="white", font=("Consolas", 9), state="disabled")
-        self.log_view.pack(fill="both", expand=True, padx=5, pady=5)
+        bottom = ttk.LabelFrame(main, text="Execution log", padding=10)
+        bottom.pack(fill="x", pady=(16, 0))
+        self.log_view = tk.Text(bottom, height=6, bg="#ffffff", fg="#323130", insertbackground="#323130", selectbackground="#cce4f7", selectforeground="#1a1a1a", relief="flat", borderwidth=0, highlightthickness=0, padx=10, pady=8, font=("Consolas", 10), state="disabled")
+        log_scroll = ttk.Scrollbar(bottom, orient="vertical", command=self.log_view.yview)
+        self.log_view.configure(yscrollcommand=log_scroll.set)
+        log_scroll.pack(side="right", fill="y")
+        self.log_view.pack(side="left", fill="both", expand=True)
         self.status = tk.StringVar(value="Idle — connect Android device or start an emulator, then press Refresh.")
-        ttk.Label(main, textvariable=self.status).pack(anchor="w", pady=(4, 0))
+        ttk.Label(main, textvariable=self.status, style="Muted.TLabel").pack(anchor="w", pady=(10, 0))
         self.refresh_devices()
 
     def logging(self, msg):

@@ -2,3 +2,4 @@ opencv-python>=4.8,<5
 numpy>=1.24,<3
 Pillow>=10,<13
 pynput>=1.7,<2
+sv-ttk>=2.6,<3
