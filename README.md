@@ -2,6 +2,8 @@
 
 A desktop Python/Tkinter workflow editor for controlling **your Android phone or emulator via ADB**. It supports OpenCV screenshot matching, conditional branching, retry limits, clicks, swipes, key presses, text input, loops, JSON saving and an emergency stop.
 
+The editor uses the [Sun Valley ttk theme](https://github.com/rdbende/Sun-Valley-ttk-theme) for Windows 11-style controls, with separate file and device toolbars, scrollable workflow/configuration panels, and a light execution log. The theme is included in the Windows executable; source users should reinstall `requirements.txt` when updating.
+
 ## Run the Windows executable
 
 Double-click `AndroidVisualAutoclicker.exe`. Users do not need Python, pip, or a terminal.

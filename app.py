@@ -197,7 +197,7 @@ class Editor(tk.Tk):
         ttk.Label(left, text="Use ↑ ↓ to reorder. Branches refer to step IDs.\nBlank next continues to the following row.\nThe highlighted row shows the executing step.", style="Muted.TLabel", justify="left").pack(anchor="w", pady=(4, 0))
 
         ttk.Label(right, text="Step configuration", style="Section.TLabel").pack(anchor="w", pady=(0, 12))
-        canvas = tk.Canvas(right, highlightthickness=0, bg=ttk.Style(self).lookup("TFrame", "background"))
+        canvas = tk.Canvas(right, highlightthickness=0, bg=self.cget("background"))
         scrollbar = ttk.Scrollbar(right, orient="vertical", command=canvas.yview)
         self.form = ttk.Frame(canvas)
         self.form.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
