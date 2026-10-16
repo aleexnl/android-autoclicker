@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
 import queue
 import re
@@ -12,6 +13,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from pynput import keyboard
 import sv_ttk
+import darkdetect
 
 from PIL import Image, ImageTk
 
@@ -22,6 +24,24 @@ if getattr(sys, "frozen", False):
     ROOT = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "AndroidVisualAutoclicker"
 TEMPLATES = ROOT / "templates"
 TEMPLATES.mkdir(parents=True, exist_ok=True)
+SETTINGS_PATH = Path(os.environ.get("LOCALAPPDATA", Path.home() / ".config")) / "AndroidVisualAutoclicker" / "settings.json"
+APPEARANCES = ("System", "Light", "Dark")
+
+
+def load_appearance():
+    try:
+        settings = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+        value = settings.get("appearance") if isinstance(settings, dict) else None
+        return value if value in APPEARANCES else "System"
+    except (OSError, ValueError):
+        return "System"
+
+
+def save_appearance(value):
+    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary = SETTINGS_PATH.with_suffix(".tmp")
+    temporary.write_text(json.dumps({"appearance": value}, indent=2), encoding="utf-8")
+    temporary.replace(SETTINGS_PATH)
 
 FIELDS = [
     ("id", "Step ID"), ("type", "Action"), ("image", "Image file"),
@@ -112,13 +132,11 @@ class CropDialog(tk.Toplevel):
 class Editor(tk.Tk):
     def __init__(self):
         super().__init__()
-        sv_ttk.set_theme("light")
-        style = ttk.Style(self)
-        style.configure("Title.TLabel", font=("Segoe UI", 20, "bold"))
-        style.configure("Section.TLabel", font=("Segoe UI", 12, "bold"))
-        style.configure("Muted.TLabel", foreground="#616161")
-        style.configure("Treeview", rowheight=34)
-        style.configure("Compact.TButton", padding=(8, 5), width=3)
+        self.appearance = tk.StringVar(value=load_appearance())
+        self.system_theme = "light"
+        self.active_theme = None
+        self.theme_stop = threading.Event()
+        self.apply_appearance()
         self.title("Android Visual Autoclicker — ADB Workflow Studio")
         self.geometry("1280x860")
         self.minsize(1100, 720)
@@ -132,6 +150,8 @@ class Editor(tk.Tk):
         self.vars = {}
         self.widgets = {}
         self._build()
+        self.apply_appearance()
+        threading.Thread(target=self.watch_system_theme, daemon=True).start()
         self.refresh_tree()
         self.tree.selection_set(self.steps[0]["id"])
         self.on_select()
@@ -143,12 +163,55 @@ class Editor(tk.Tk):
         self.hotkey_listener.daemon = True
         self.hotkey_listener.start()
 
+    def watch_system_theme(self):
+        # OS detection stays off the Tk thread; all widget changes use the queue.
+        while not self.theme_stop.is_set():
+            try:
+                theme = "dark" if darkdetect.isDark() else "light"
+            except Exception:
+                theme = "light"
+            self.messages.put(("system_theme", theme))
+            self.theme_stop.wait(2)
+
+    def change_appearance(self, _event=None):
+        self.apply_appearance()
+        try:
+            save_appearance(self.appearance.get())
+        except OSError as exc:
+            messagebox.showwarning("Appearance not saved", f"The theme was applied, but could not be saved for next time.\n{exc}", parent=self)
+
+    def apply_appearance(self):
+        preference = self.appearance.get()
+        theme = self.system_theme if preference == "System" else preference.lower()
+        if theme != self.active_theme:
+            sv_ttk.set_theme(theme)
+            self.active_theme = theme
+        dark = theme == "dark"
+        style = ttk.Style(self)
+        style.configure("Title.TLabel", font=("Segoe UI", 20, "bold"))
+        style.configure("Section.TLabel", font=("Segoe UI", 12, "bold"))
+        style.configure("Muted.TLabel", foreground="#bdbdbd" if dark else "#616161")
+        style.configure("Treeview", rowheight=34)
+        style.configure("Compact.TButton", padding=(8, 5), width=3)
+        if hasattr(self, "form_canvas"):
+            self.form_canvas.configure(bg=self.cget("background"))
+        if hasattr(self, "log_view"):
+            foreground = "#eeeeee" if dark else "#323130"
+            self.log_view.configure(bg="#202020" if dark else "#ffffff", fg=foreground,
+                                    insertbackground=foreground,
+                                    selectbackground="#315d80" if dark else "#cce4f7",
+                                    selectforeground="#ffffff" if dark else "#1a1a1a")
+
     def _build(self):
         main = ttk.Frame(self, padding=20)
         main.pack(fill="both", expand=True)
         header = ttk.Frame(main)
         header.pack(fill="x", pady=(0, 16))
         ttk.Label(header, text="Workflow Studio", style="Title.TLabel").pack(side="left")
+        ttk.Label(header, text="Appearance:").pack(side="left", padx=(24, 6))
+        appearance_combo = ttk.Combobox(header, textvariable=self.appearance, values=APPEARANCES, state="readonly", width=9)
+        appearance_combo.pack(side="left")
+        appearance_combo.bind("<<ComboboxSelected>>", self.change_appearance)
         ttk.Button(header, text="Save as", command=self.save_as).pack(side="right")
         ttk.Button(header, text="Save", command=self.save).pack(side="right", padx=6)
         ttk.Button(header, text="Open", command=self.open_file).pack(side="right")
@@ -198,6 +261,7 @@ class Editor(tk.Tk):
 
         ttk.Label(right, text="Step configuration", style="Section.TLabel").pack(anchor="w", pady=(0, 12))
         canvas = tk.Canvas(right, highlightthickness=0, bg=self.cget("background"))
+        self.form_canvas = canvas
         scrollbar = ttk.Scrollbar(right, orient="vertical", command=canvas.yview)
         self.form = ttk.Frame(canvas)
         self.form.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
@@ -265,6 +329,10 @@ class Editor(tk.Tk):
                     self.running = False
                     self.start_btn.configure(state="normal")
                     self.status.set(value)
+                elif event == "system_theme":
+                    self.system_theme = value
+                    if self.appearance.get() == "System" and self.active_theme != value:
+                        self.apply_appearance()
         except queue.Empty:
             pass
         self.after(100, self.process_messages)
@@ -533,6 +601,7 @@ class Editor(tk.Tk):
             self.logging("Emergency stop requested. Current ADB call may take up to its timeout to return.")
 
     def close(self):
+        self.theme_stop.set()
         self.stop_event.set()
         self.hotkey_listener.stop()
         self.destroy()
