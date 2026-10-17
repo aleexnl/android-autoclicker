@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout,
     QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow,
     QMessageBox, QPlainTextEdit, QPushButton, QRubberBand, QScrollArea,
-    QSplitter, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QStyle, QSplitter, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from engine import ADB, AutomationError, load_workflow, run_workflow, save_workflow, validate
@@ -140,6 +140,8 @@ class Editor(QMainWindow):
         self.workers = []
         self.hotkey_listener = None
         self.vars, self.rows = {}, {}
+        self.editing_id = None
+        self.form_dirty = False
         self._build()
         self.platform_style = PlatformStyle(self)
         self.change_appearance(persist=False)
@@ -154,6 +156,8 @@ class Editor(QMainWindow):
     @staticmethod
     def button(layout, label, callback):
         button = QPushButton(label)
+        button.setMinimumHeight(32)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
         button.clicked.connect(callback)
         layout.addWidget(button)
         return button
@@ -164,16 +168,26 @@ class Editor(QMainWindow):
         main = QVBoxLayout(central)
         main.setContentsMargins(20, 16, 20, 16)
         main.setSpacing(12)
+        # Keep the system palette and native focus/hover rendering on every OS.
+        self.setStyleSheet("QTreeView::item { padding: 8px 4px; } "
+                           "QLineEdit, QComboBox { min-height: 28px; } "
+                           "QPushButton { padding: 4px 10px; } "
+                           "QLabel[section=true] { font-weight: bold; }")
         header = QHBoxLayout()
         title = QLabel("Workflow Studio")
         font = title.font()
         font.setPointSize(21)
         font.setBold(True)
         title.setFont(font)
-        header.addWidget(title)
+        heading = QVBoxLayout()
+        heading.setSpacing(3)
+        heading.addWidget(title)
+        heading.addWidget(QLabel("Build, test, and run Android automations."))
+        header.addLayout(heading)
         header.addStretch()
         header.addWidget(QLabel("Appearance"))
         self.appearance = QComboBox()
+        self.appearance.setAccessibleName("Appearance")
         self.appearance.addItems(APPEARANCES)
         self.appearance.setCurrentText(load_appearance())
         self.appearance.currentTextChanged.connect(self.change_appearance)
@@ -194,20 +208,28 @@ class Editor(QMainWindow):
         self.device_panel = QWidget()
         toolbar = QHBoxLayout(self.device_panel)
         toolbar.setContentsMargins(0, 0, 0, 0)
-        toolbar.addWidget(QLabel("Device"))
+        toolbar.addWidget(QLabel("1  Connect device"))
         self.device = QComboBox()
         self.device.setEditable(True)
-        self.device.setMinimumWidth(180)
+        self.device.setMinimumWidth(160)
+        self.device.setAccessibleName("ADB device")
+        self.device.lineEdit().setPlaceholderText("Select a device or enter its serial")
         toolbar.addWidget(self.device, 1)
         self.button(toolbar, "Refresh", self.refresh_devices)
         self.button(toolbar, "Connect MuMu…", self.connect_mumu)
-        self.button(toolbar, "Capture template…", self.capture)
+        self.capture_btn = self.button(toolbar, "Capture template…", self.capture)
         main.addWidget(self.device_panel)
         controls = QHBoxLayout()
         self.hotkey_status = QLabel("F8 stops while the app is focused")
+        self.hotkey_status.setWordWrap(True)
+        self.run_state = QLabel("Ready")
+        self.run_state.setProperty("section", True)
+        controls.addWidget(self.run_state)
         controls.addWidget(self.hotkey_status, 1)
         self.start_btn = self.button(controls, "Run (F6)", self.run)
         self.stop_btn = self.button(controls, "STOP (F8)", self.stop)
+        self.start_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+        self.stop_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaStop))
         self.stop_btn.setEnabled(False)
         main.addLayout(controls)
         for key, callback in [("F6", self.run), ("F8", self.stop), ("Escape", self.stop)]:
@@ -221,10 +243,13 @@ class Editor(QMainWindow):
         left = QWidget()
         left.setAutoFillBackground(True)
         layout = QVBoxLayout(left)
-        layout.setContentsMargins(0, 0, 8, 0)
-        layout.addWidget(QLabel("Workflow steps"))
+        layout.setContentsMargins(12, 12, 12, 12)
+        self.steps_heading = QLabel("2  Workflow steps")
+        self.steps_heading.setProperty("section", True)
+        layout.addWidget(self.steps_heading)
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Step ID", "Action", "Transitions"])
+        self.tree.setAccessibleName("Workflow steps")
         self.tree.setRootIsDecorated(False)
         self.tree.setAlternatingRowColors(True)
         self.tree.setUniformRowHeights(True)
@@ -234,21 +259,40 @@ class Editor(QMainWindow):
         layout.addWidget(self.tree, 1)
         row = QHBoxLayout()
         self.kind = QComboBox()
+        self.kind.setAccessibleName("Action to add")
         self.kind.addItems(DEFAULTS)
         row.addWidget(self.kind)
-        for label, callback in [("Add", self.add_step), ("Clone", self.clone_step), ("Delete", self.delete_step),
-                                ("↑", lambda: self.move(-1)), ("↓", lambda: self.move(1))]:
-            self.button(row, label, callback)
+        self.button(row, "Add step", self.add_step)
+        row.addStretch()
         layout.addLayout(row)
+        row = QHBoxLayout()
+        self.step_buttons = []
+        for label, callback in [("Clone", self.clone_step), ("Delete", self.delete_step),
+                                ("Move up", lambda: self.move(-1)), ("Move down", lambda: self.move(1))]:
+            self.step_buttons.append(self.button(row, label, callback))
+        layout.addLayout(row)
+        row.addStretch()
         help_text = QLabel("Branches refer to step IDs. Blank next continues to the following row.")
         help_text.setWordWrap(True)
         layout.addWidget(help_text)
         self.split.addWidget(left)
+        inspector = QWidget()
+        inspector_layout = QVBoxLayout(inspector)
+        inspector_layout.setContentsMargins(0, 0, 0, 0)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         form = QWidget()
         form.setAutoFillBackground(True)
         self.form = QFormLayout(form)
+        self.form.setContentsMargins(18, 16, 18, 16)
+        self.form.setVerticalSpacing(8)
+        self.form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        self.editor_heading = QLabel("3  Step settings")
+        self.editor_heading.setProperty("section", True)
+        self.form.addRow(self.editor_heading)
+        self.action_help = QLabel()
+        self.action_help.setWordWrap(True)
+        self.form.addRow(self.action_help)
         self.form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         for name, label in FIELDS:
             if name == "type":
@@ -271,20 +315,53 @@ class Editor(QMainWindow):
                 self.button(row, "Clear", lambda: self.vars["region"].clear())
             if name in {"on_true", "on_false", "next"}:
                 self.button(row, "IDs", self.show_ids)
-            self.form.addRow(label, wrap)
+            field_label = QLabel(label)
+            field_label.setBuddy(widget)
+            self.form.addRow(field_label, wrap)
+            if isinstance(widget, QLineEdit):
+                widget.textChanged.connect(self.mark_form_dirty)
+            elif isinstance(widget, QCheckBox):
+                widget.toggled.connect(self.mark_form_dirty)
+            else:
+                widget.currentTextChanged.connect(self.mark_form_dirty)
             self.rows[name] = wrap
-        apply_button = QPushButton("Apply changes")
-        apply_button.clicked.connect(self.apply)
-        self.form.addRow(apply_button)
+        hints = {"image": "Choose a captured PNG template", "region": "Blank = entire screen",
+                 "next": "Blank = next row", "on_true": "Blank = next row", "on_false": "Blank = next row",
+                 "key": "e.g. KEYCODE_BACK"}
+        for name, hint in hints.items():
+            self.vars[name].setPlaceholderText(hint)
+            self.vars[name].setToolTip(hint)
+        self.draft_status = QLabel("Changes applied")
+        self.draft_status.setWordWrap(True)
+
+        actions = QHBoxLayout()
+        self.apply_button = self.button(actions, "Apply changes", self.apply)
+        self.revert_button = self.button(actions, "Revert", self.revert_form)
+
         scroll.setWidget(form)
-        self.split.addWidget(scroll)
+        inspector_layout.addWidget(scroll, 1)
+        inspector_layout.addWidget(self.draft_status)
+        inspector_layout.addLayout(actions)
+        self.split.addWidget(inspector)
         self.material_surfaces = [left, form]
         self.split.setSizes([600, 500])
-        main.addWidget(QLabel("Execution log"))
+        log_header = QHBoxLayout()
+        self.log_toggle = QPushButton("Execution log")
+        self.log_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.log_toggle.setCheckable(True)
+        self.log_toggle.setChecked(True)
+        self.log_toggle.setToolTip("Show or hide execution details")
+        log_header.addWidget(self.log_toggle)
+        log_header.addStretch()
+        self.button(log_header, "Clear log", lambda: self.log_view.clear())
+        main.addLayout(log_header)
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(2000)
-        self.log_view.setMaximumHeight(150)
+        self.log_view.setAccessibleName("Execution log")
+        self.log_view.setPlaceholderText("Run a workflow to see progress and device messages here.")
+        self.log_view.setMaximumHeight(90)
+        self.log_toggle.toggled.connect(self.log_view.setVisible)
         main.addWidget(self.log_view)
         self.statusBar().showMessage("Connect an Android device or start an emulator, then press Refresh.")
 
@@ -345,6 +422,7 @@ class Editor(QMainWindow):
 
     def set_controls(self):
         available = not (self.running or self.busy or self.closing)
+        self.run_state.setText("Closing…" if self.closing else "Running" if self.running else "Working…" if self.busy else "Ready")
         self.device_panel.setEnabled(available)
         self.start_btn.setEnabled(available)
         self.stop_btn.setEnabled(self.running and not self.closing)
@@ -373,6 +451,9 @@ class Editor(QMainWindow):
                 self.running = False
                 self.set_controls()
                 self.statusBar().showMessage(value)
+                self.run_state.setText(value)
+                if value.startswith("Failed"):
+                    self.log_toggle.setChecked(True)
             elif event == "result":
                 callback, result, error = value
                 self.busy = False
@@ -398,6 +479,8 @@ class Editor(QMainWindow):
         if selected in devices:
             self.device.setCurrentText(selected)
         self.logging("Devices: " + (", ".join(devices) or "none connected"))
+        if not devices:
+            self.statusBar().showMessage("No devices found. Enable USB debugging and authorize your computer, or connect MuMu.")
 
     def connect_mumu(self):
         if self.busy or self.running:
@@ -440,11 +523,12 @@ class Editor(QMainWindow):
             self.vars["image"].setText(self.relative_image(Path(target)))
 
     def refresh_tree(self, selected=None):
+        self.steps_heading.setText(f"2  Workflow steps · {len(self.steps)}")
         self.tree.blockSignals(True)
         self.tree.clear()
         for step in self.steps:
-            flow = [f"{tag} {step[field]}" for field, tag in [("on_true", "✓"), ("on_false", "✗"), ("next", "→")] if step.get(field)]
-            item = QTreeWidgetItem([step["id"], step["type"], "  ".join(flow) or "↓ next row"])
+            flow = [f"{tag}: {step[field]}" for field, tag in [("on_true", "Found"), ("on_false", "Missing"), ("next", "Next")] if step.get(field)]
+            item = QTreeWidgetItem([step["id"], step["type"], "  ".join(flow) or ("End workflow" if step["type"] == "stop" else "Continue to next row")])
             self.tree.addTopLevelItem(item)
             if step["id"] == selected:
                 self.tree.setCurrentItem(item)
@@ -466,13 +550,61 @@ class Editor(QMainWindow):
             widget.setText(",".join(map(str, value)) if isinstance(value, (list, tuple)) else str(value))
         widget.blockSignals(False)
 
+    def mark_form_dirty(self, *_):
+        self.form_dirty = True
+        self.draft_status.setText("Pending edits · switch steps to apply, or use Apply changes.")
+        self.apply_button.setEnabled(True)
+        self.revert_button.setEnabled(True)
+
+    def revert_form(self):
+        self.form_dirty = False
+        self.on_select()
+
+    def select_id(self, identifier):
+        self.tree.blockSignals(True)
+        for index in range(self.tree.topLevelItemCount()):
+            item = self.tree.topLevelItem(index)
+            if item.text(0) == identifier:
+                self.tree.setCurrentItem(item)
+                break
+        self.tree.blockSignals(False)
+
     def on_select(self):
         step = self.get_selected()
+        if self.form_dirty and step and self.editing_id and step["id"] != self.editing_id:
+            target = step["id"]
+            self.select_id(self.editing_id)
+            if not self.apply():
+                return
+            self.select_id(target)
+            step = self.get_selected()
+        self.editing_id = step["id"] if step else None
+        self.form_dirty = False
         for name in self.vars:
             self.set_value(name, step.get(name, "") if step else "")
         self.show_fields(step["type"] if step else "stop")
+        self.editor_heading.setText(f"3  Step settings · {step['id']}" if step else "3  Add a step to begin")
+        self.draft_status.setText("Changes applied" if step else "Choose an action on the left and select Add step.")
+        self.apply_button.setEnabled(False)
+        self.revert_button.setEnabled(False)
+        for widget in self.rows.values():
+            widget.setEnabled(step is not None)
+        index = self.steps.index(step) if step else -1
+        for button, enabled in zip(self.step_buttons, [bool(step), bool(step), index > 0, 0 <= index < len(self.steps) - 1]):
+            button.setEnabled(enabled)
 
     def show_fields(self, kind):
+        descriptions = {
+            "find_image": "Find a template on the device screen, then tap it or branch based on the result.",
+            "tap": "Tap a position in device pixels, measured from the top-left corner.",
+            "swipe": "Drag from the start coordinates to the end coordinates over the given duration.",
+            "wait": "Pause before continuing to the next step.",
+            "key": "Send an Android key such as KEYCODE_BACK or KEYCODE_HOME.",
+            "text": "Type text into the focused field on the device.",
+            "goto": "Jump to a step ID. Use a stop step to end a loop.",
+            "stop": "End the workflow. No further steps will run.",
+        }
+        self.action_help.setText(descriptions.get(kind, ""))
         visible = {"id", "type", *FIELDS_BY_TYPE.get(kind, [])}
         for name, row in self.rows.items():
             self.form.setRowVisible(row, name in visible)
@@ -531,16 +663,21 @@ class Editor(QMainWindow):
                 for branch in ("next", "on_true", "on_false"):
                     if other.get(branch) == old_id:
                         other[branch] = identifier
+        self.form_dirty = False
         self.refresh_tree(identifier)
         return True
 
     def add_step(self):
+        if self.form_dirty and not self.apply():
+            return
         step = new_step(self.kind.currentText(), {s["id"] for s in self.steps})
         selected = self.get_selected()
         self.steps.insert(self.steps.index(selected) + 1 if selected else len(self.steps), step)
         self.refresh_tree(step["id"])
 
     def clone_step(self):
+        if self.form_dirty and not self.apply():
+            return
         selected = self.get_selected()
         if selected:
             step = copy.deepcopy(selected)
@@ -555,10 +692,13 @@ class Editor(QMainWindow):
         if any(s is not selected and selected["id"] in [s.get(k) for k in ("next", "on_true", "on_false")] for s in self.steps):
             QMessageBox.warning(self, "Referenced step", "Remove incoming branch links before deleting this step")
             return
+        self.form_dirty = False
         self.steps.remove(selected)
         self.refresh_tree(self.steps[0]["id"] if self.steps else None)
 
     def move(self, direction):
+        if self.form_dirty and not self.apply():
+            return
         selected = self.get_selected()
         if selected:
             index = self.steps.index(selected)
@@ -621,6 +761,7 @@ class Editor(QMainWindow):
         except (OSError, ValueError, AutomationError, KeyError, TypeError, AttributeError) as exc:
             QMessageBox.warning(self, "Open failed", str(exc))
             return
+        self.form_dirty = False
         self.steps, self.workflow_path = steps, Path(path)
         self.refresh_tree(steps[0]["id"])
 
@@ -656,6 +797,7 @@ class Editor(QMainWindow):
     def stop(self):
         if self.running:
             self.stop_event.set()
+            self.run_state.setText("Stopping…")
             self.statusBar().showMessage("Stopping after the current ADB operation…")
 
     def closeEvent(self, event):

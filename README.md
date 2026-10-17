@@ -4,6 +4,16 @@ A desktop **Python/PySide6 (Qt Widgets)** workflow editor for controlling an And
 
 The editor uses Qt's platform style, native file dialogs, keyboard shortcuts, and resizable panels. **System**, **Light**, and **Dark** appearance use Qt's OS color-scheme integration; explicit overrides depend on the platform/style. Device discovery, connection, screenshot capture, and workflow execution run off the GUI thread. Prepared image templates are cached for each run, and the execution log is bounded to 2,000 lines.
 
+## Platform appearance
+
+Platform materials are automatic; the Appearance selector continues to control System, Light, and Dark mode.
+
+- **Windows:** the native frame requests [Mica](https://learn.microsoft.com/en-us/windows/apps/design/style/mica) on Windows 11 22H2 or newer through the documented DWM backdrop API. The title bar and standard resize/snap controls are retained. Qt's editing surfaces remain opaque, so this is a Mica frame, not a translucent editor canvas. Older Windows versions and rejected requests retain the normal frame. Windows controls the material's accessibility and transparency fallback.
+- **macOS:** an AppKit `NSGlassEffectView` supplies Liquid Glass on macOS 26+, behind the window's content. Older supported versions use `NSVisualEffectView` vibrancy. Editing panels and the log stay solid. Reduce Transparency or Increase Contrast disables the material; the app checks these preferences while open. The macOS-only PyObjC dependency is installed by `requirements.txt`. Native macOS rendering still requires on-device visual validation.
+- **Linux:** the app leaves the desktop-selected Qt style, palette, and fonts intact instead of imposing a glass effect. KDE can use Breeze when its compatible Qt integration is installed; GNOME may need a compatible Qt theme/platform plugin. A bundled application cannot promise an exact GTK/libadwaita appearance. If no desktop integration is available, Qt's default style is the fallback. The app does not change desktop settings or force `QT_STYLE_OVERRIDE` / `QT_QPA_PLATFORMTHEME`.
+
+Offscreen tests intentionally skip OS material APIs. `tests/test_platform_style.py` checks fallback policy and native-view lifecycle using mocks. On Windows, the DWM Mica attribute has also been read back successfully for all three appearance modes; this does not constitute macOS/Linux visual validation.
+
 ## Run from source (Windows, Linux, macOS)
 
 Use Python 3.10+ and the Android SDK [Platform Tools](https://developer.android.com/tools/releases/platform-tools) for your OS. Put `adb` on PATH or place the complete `platform-tools` directory beside `app.py`. Connect a device with USB debugging enabled and authorize it when prompted.
@@ -59,7 +69,7 @@ The default workflow (`workflow.json`), captured templates (`templates/`), and a
 - macOS: `~/Library/Application Support/AndroidVisualAutoclicker`
 - Linux: `$XDG_CONFIG_HOME/AndroidVisualAutoclicker`, or `~/.config/AndroidVisualAutoclicker`
 
-Existing workflow JSON files remain supported: use **Open** to select them, including old `example_workflow.json` files. Relative template paths resolve against the workflow's directory. Keep templates with the workflow when moving it between computers; absolute paths need updating on a different computer. Choose **Apply changes** before selecting a different step. Save and Run apply the currently selected step automatically.
+Existing workflow JSON files remain supported: use **Open** to select them, including old `example_workflow.json` files. Relative template paths resolve against the workflow's directory. Keep templates with the workflow when moving it between computers; absolute paths need updating on a different computer. Edits apply automatically when you select another step, add, clone, reorder, save, or run. Invalid edits keep the current step selected so you can correct them. **Apply changes** commits edits immediately; **Revert** restores the selected step. Applying changes updates the editor; use **Save** to write the workflow to disk. The execution log can be collapsed to make more room for editing.
 
 ## Keyboard shortcuts and stop behavior
 

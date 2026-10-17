@@ -198,6 +198,52 @@ class EditorTests(unittest.TestCase):
         release.set()
         self.pump(lambda: not self.window.isVisible())
 
+    def test_switch_step_applies_pending_edits_and_renamed_branches(self):
+        self.window.steps[1]['next'] = 'step_1'
+        self.window.vars['id'].setText('renamed')
+        self.window.vars['threshold'].setText('0.91')
+        self.window.tree.setCurrentItem(self.window.tree.topLevelItem(1))
+        self.assertEqual(self.window.steps[0]['id'], 'renamed')
+        self.assertEqual(self.window.steps[0]['threshold'], 0.91)
+        self.assertEqual(self.window.vars['next'].text(), 'renamed')
+        self.assertEqual(self.window.get_selected()['id'], 'step_2')
+        self.assertFalse(self.window.form_dirty)
+
+    def test_invalid_draft_blocks_selection_and_revert_restores_values(self):
+        self.window.vars['threshold'].setText('invalid')
+        with patch.object(QMessageBox, 'warning') as warning:
+            self.window.tree.setCurrentItem(self.window.tree.topLevelItem(1))
+        warning.assert_called_once()
+        self.assertEqual(self.window.get_selected()['id'], 'step_1')
+        self.assertEqual(self.window.vars['threshold'].text(), 'invalid')
+        self.assertTrue(self.window.form_dirty)
+        self.window.revert_form()
+        self.assertEqual(self.window.vars['threshold'].text(), '0.88')
+        self.assertFalse(self.window.apply_button.isEnabled())
+
+    def test_clone_includes_pending_edits(self):
+        self.window.vars['threshold'].setText('0.93')
+        self.window.clone_step()
+        self.assertEqual(self.window.steps[0]['threshold'], 0.93)
+        self.assertEqual(self.window.get_selected()['threshold'], 0.93)
+        self.assertNotEqual(self.window.get_selected()['id'], 'step_1')
+
+    def test_empty_workflow_disables_editor_and_add_restores_it(self):
+        self.window.steps.clear()
+        self.window.refresh_tree()
+        self.assertFalse(self.window.vars['id'].isEnabled())
+        self.assertTrue(all(not b.isEnabled() for b in self.window.step_buttons))
+        self.window.add_step()
+        self.assertTrue(self.window.vars['id'].isEnabled())
+        self.assertEqual(len(self.window.steps), 1)
+
+    def test_failure_reveals_collapsed_log(self):
+        self.window.log_toggle.setChecked(False)
+        self.window.messages.put(('done', 'Failed — see execution log'))
+        self.window.process_messages()
+        self.assertTrue(self.window.log_view.isVisible())
+        self.assertEqual(self.window.run_state.text(), 'Failed — see execution log')
+
     def test_crop_scales_back_to_device_pixels(self):
         canvas = editor.CropCanvas(Image.new('RGB', (1800, 1300)))
         selected = []

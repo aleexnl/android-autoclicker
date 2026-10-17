@@ -31,6 +31,9 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: python scripts/smoke_package.py
+      - name: Native platform startup
+        if: runner.os != 'Linux'
+        run: python scripts/smoke_package.py
       - uses: actions/upload-artifact@v4
         with:
           name: AndroidVisualAutoclicker-${{ runner.os }}-${{ runner.arch }}
